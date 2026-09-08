@@ -1,0 +1,41 @@
+﻿# Build outputs and intermediate files
+.build/
+build/
+build_intermediate/
+bin/
+out/
+x64/
+Debug/
+Release/
+
+# Visual Studio / IDE files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.sln.docstates
+*.db
+*.opendb
+
+# Compiled binaries and objects
+*.obj
+*.o
+*.lib
+*.a
+*.exp
+*.ilk
+*.pdb
+
+# Generated embedded payloads
+
+# Logs and user configs
+*.log
+*.ini
+*.tmp
+*.bak
+*.error
+
+# Test scripts
+test_*.ps1
+test_*.cpp
