@@ -48,7 +48,7 @@ Unlike traditional mods that rely on downloading external debugging symbols (PDB
 
 Requirements: Visual Studio 2022 / Build Tools (C++20), Windows SDK (10.0.22621+), CMake 3.20+.
 
-`at
+`bat
 build.bat
 `
 
