@@ -63,6 +63,7 @@ bool Injector::InstallExplorerHook() {
         return false;
     }
     DWORD explorerThreadId = GetWindowThreadProcessId(taskbar, nullptr);
+    LogDebug("Explorer thread=" + std::to_string(explorerThreadId));
     if (!explorerThreadId) {
         LogDebug("InstallExplorerHook: taskbar thread not found");
         return false;
@@ -71,7 +72,18 @@ bool Injector::InstallExplorerHook() {
     std::wstring dllPath = PayloadManager::GetHookDllPath();
     s_hHookModule = LoadLibraryW(dllPath.c_str());
     if (!s_hHookModule) {
+        const DWORD error = GetLastError();
+        LogDebug("LoadLibrary error=" + std::to_string(error));
         LogDebug("InstallExplorerHook: LoadLibrary failed");
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            std::wstring message = L"Lightency could not load its taskbar extension.\n\n"
+                L"Extract all files from the release ZIP into the same folder. "
+                L"The extension must be present beside lightency.exe.\n\n";
+            message += dllPath + L"\nWindows error: " + std::to_wstring(error);
+            MessageBoxW(nullptr, message.c_str(), L"Lightency", MB_OK | MB_ICONERROR);
+        }
         return false;
     }
 
@@ -86,6 +98,7 @@ bool Injector::InstallExplorerHook() {
     s_hExplorerHook = SetWindowsHookExW(
         WH_CALLWNDPROC, hookProc, s_hHookModule, explorerThreadId);
     if (!s_hExplorerHook) {
+        LogDebug("SetWindowsHookEx error=" + std::to_string(GetLastError()));
         LogDebug("InstallExplorerHook: SetWindowsHookEx failed");
         FreeLibrary(s_hHookModule);
         s_hHookModule = nullptr;
@@ -94,6 +107,7 @@ bool Injector::InstallExplorerHook() {
 
 
     SendMessageTimeoutW(taskbar, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 250, nullptr);
+    LogDebug("Explorer hook installed");
     return true;
 }
 
@@ -114,6 +128,9 @@ bool Injector::Initialize() {
     }
 
 
+    LogDebug("Shared mapping=" + std::to_string(s_hMapFile != nullptr) +
+        " view=" + std::to_string(s_pSharedMemory != nullptr) +
+        " winerr=" + std::to_string(GetLastError()));
     if (!InstallExplorerHook()) return false;
 
     LogDebug("Injector::Initialize end");
@@ -163,6 +180,10 @@ void Injector::Invalidate() {
 
 void Injector::Update(const AppConfig& config) {
     LogDebug("Injector::Update start");
+    LogDebug("Settings clear=" + std::to_string(config.clearTaskbar) +
+        " dock=" + std::to_string(config.dockAnimation) +
+        " tray=" + std::to_string(config.trayItems) +
+        " start=" + std::to_string(config.layoutEditor));
 
 
     if (!s_pSharedMemory || !s_hExplorerHook) {

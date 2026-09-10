@@ -3,6 +3,7 @@
 #include <atomic>
 #include "dock_animation.h"
 #include "../common/types.h"
+#include "../common/diagnostics.h"
 
 static std::atomic<bool> g_shutdownStarted{ false };
 static std::atomic<bool> g_hookReady{ false };
@@ -45,11 +46,36 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
         if (!IsExplorerProcess()) return TRUE;
         std::thread([hModule]() {
+            WriteDiagnostic("explorer", "Extension worker started");
+            std::atomic<bool> initializationFinished{false};
+            std::thread watchdog([&initializationFinished]() {
+                const ULONGLONG started = GetTickCount64();
+                unsigned seconds = 0;
+                while (!initializationFinished.load()) {
+                    Sleep(1000);
+                    if (++seconds % 10 == 0 && !initializationFinished.load()) {
+                        WriteDiagnostic("explorer", "Initialization still pending elapsed_ms=" +
+                            std::to_string(GetTickCount64() - started));
+                    }
+                }
+            });
             g_hookReady.store(
                 Lightency::DockAnimation::Initialize(),
                 std::memory_order_release);
+            initializationFinished.store(true);
+            watchdog.join();
+            WriteDiagnostic("explorer", "Initialize ready=" + std::to_string(g_hookReady.load()));
+
+            if (g_hookReady.load(std::memory_order_acquire)) {
+                if (HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr)) {
+                    SendMessageTimeoutW(taskbar, Lightency::GetLightencyUpdateMsg(),
+                        0, 0, SMTO_ABORTIFHUNG, 1000, nullptr);
+                }
+            }
 
             HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Lightency_Shared_Config_v7");
+            WriteDiagnostic("explorer", "Owner mapping=" + std::to_string(mapping != nullptr) +
+                " winerr=" + std::to_string(GetLastError()));
             auto* config = mapping ? static_cast<Lightency::SharedHookConfig*>(
                 MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, sizeof(Lightency::SharedHookConfig))) : nullptr;
 

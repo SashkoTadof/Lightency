@@ -1,5 +1,6 @@
 ﻿# Build outputs and intermediate files
 .build/
+.build-*/
 build/
 build_intermediate/
 bin/

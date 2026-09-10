@@ -1,10 +1,10 @@
 # Lightency
 
-Native Windows 11 taskbar customization with a small footprint.
+Native Windows 11 taskbar customization with a minimal footprint and zero latency.
 
-**Windows 11 · x64 · Native C++ · Portable**
+**Windows 11 · x64 · Native C++20 · Portable**
 
-> Customization should not cost you latency or FPS.
+> Customization should never cost you input latency or FPS.
 
 <p align="center">
   <img src="assets/screenshots/main.png" width="360" alt="Lightency settings">
@@ -13,62 +13,47 @@ Native Windows 11 taskbar customization with a small footprint.
 
 ## Features
 
-- Clear taskbar with optional border removal
-- Dock-style magnification and click bounce
-- Automatic or custom animation tuning
-- Individual tray item visibility
-- Movable Start button
-- Update checks without a resident updater service
+- **Clear taskbar**: Instant transparent taskbar with optional border removal.
+- **Fluid dock animation**: macOS-style dock hover magnification and icon click bounce.
+- **Fine-tuned physics**: Adaptive automatic or customized curve, wave radius, and scale.
+- **Tray item control**: Granular visibility settings for system tray elements.
+- **Movable Start button**: Adjust or fix the Start button position.
+- **Lightweight & Portable**: Single standalone executable, no background electron/browser runtimes, no installer.
 
-No WebView, installer, or background browser process.
+## How it works
 
-## Install
+Unlike traditional mods that rely on downloading external debugging symbols (PDBs) or hooking undocumented internal functions, Lightency connects directly through the native **WinRT XAML Diagnostics** engine (InitializeXamlDiagnosticsEx):
+- **Instant startup**: Element discovery completes in ~4 ms.
+- **Zero network overhead**: No symbol downloads, no Microsoft symbol server dependency, 100% offline.
+- **Broad compatibility**: Seamless operation across various Windows 11 builds and PC configurations.
+- **Clean lifecycle**: All hooks and event subscriptions are gracefully detached when exiting, restoring the standard taskbar immediately.
 
-1. Download `Lightency-1.0.0-win-x64.zip` from [Releases](https://github.com/SashkoTadof/Lightency/releases).
-2. Extract every file to a permanent folder.
-3. Run `lightency.exe`.
+## Installation
 
-Enable **Start with Windows** in Settings if needed.
+1. Download Lightency-1.0.1-win-x64.zip from [Releases](https://github.com/SashkoTadof/Lightency/releases).
+2. Extract the archive into any folder.
+3. Launch lightency.exe.
 
-## Why the name?
+*(Optional)* Enable **Start with Windows** in Settings for seamless launch on boot.
 
-**Lightency** takes *light* and the tail of *latency*. The point is simple: keep the taskbar responsive and keep resource use low.
+## Compatibility & Requirements
 
-## How it stays light
+- **OS**: Windows 11 (x64)
+- **Privileges**: Standard user privileges (or Administrator if running elevated apps)
+- **Displays**: Full Per-Monitor DPI scaling support (V2)
 
-- Native C++ UI and taskbar extension
-- No always-running update service
-- One update check at most every 24 hours
-- Microsoft symbols are cached after the first lookup
-- Settings are stored in a small local INI file
+> **Note:** Unsigned Explorer extensions may occasionally trigger generic antivirus warnings because the extension operates within the Explorer process space. Lightency does not use dangerous injection techniques such as CreateRemoteThread or WriteProcessMemory.
 
-## Compatibility
+## Building from source
 
-- Windows 11 x64
-- Per-monitor DPI scaling
+Requirements: Visual Studio 2022 / Build Tools (C++20), Windows SDK (10.0.22621+), CMake 3.20+.
 
-Lightency works with the private XAML taskbar hosted by `explorer.exe`. A Windows update can temporarily affect Explorer-dependent features until compatible symbols are available. The first symbol lookup for dock animation requires internet access.
-
-Unsigned builds may trigger generic antivirus warnings because the taskbar extension runs inside Explorer. Lightency does not use `WriteProcessMemory` or `CreateRemoteThread`.
-
-## Updates
-
-Automatic update checks can be disabled in Settings. Manual checks are available through **Check for updates**. When a new version is available, Lightency opens its official GitHub Release page; installation stays under your control.
-
-## Uninstall
-
-Disable **Start with Windows**, exit Lightency from the tray icon, and delete its folder. Optional cached data is stored in `%LOCALAPPDATA%\Lightency`.
-
-## Build
-
-Requires Visual Studio 2022 with MSVC and C++20, CMake 3.20+, the Windows SDK, and Debugging Tools for Windows.
-
-```bat
+`at
 build.bat
-```
+`
 
-Output: `build\lightency-release`
+The output portable distribution will be in uild\lightency-release.
 
 ## License
 
-[MIT](LICENSE). MinHook uses the BSD 2-Clause license; see [third-party notices](THIRD_PARTY_NOTICES.md).
+Released under the [MIT License](LICENSE).

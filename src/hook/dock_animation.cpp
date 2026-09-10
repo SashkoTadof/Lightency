@@ -1,26 +1,19 @@
 #include "dock_animation.h"
-#include "minhook/MinHook.h"
+#include "xaml_bridge.h"
 #include <unknwn.h>
 #include <objbase.h>
 #include <windows.h>
 #include <commctrl.h>
 #pragma comment(lib, "comctl32.lib")
-#include <dbghelp.h>
 #include <stdio.h>
 #include <string>
 #include <vector>
+#include "../common/diagnostics.h"
 
 #define WH_MOD_ID L"lightency_dock"
 
-static void LogDock(const std::wstring& msg) {
-#ifdef _DEBUG
-    OutputDebugStringW((msg + L"\\n").c_str());
-#else
-    (void)msg;
-#endif
-}
-
-#define Wh_Log(fmt, ...) do {     wchar_t buf[512];     swprintf_s(buf, fmt, ##__VA_ARGS__);     LogDock(buf); } while(0)
+static inline void LogDock(const std::wstring&) {}
+#define Wh_Log(fmt, ...) do {} while(0)
 
 static Lightency::SharedHookConfig g_lightencyDockConfig = {
     true, 135, 45, 50, 0, false, true, true, true,
@@ -97,246 +90,6 @@ static void EnsureLiveConfigMapped() {
         }
     }
 }
-
-namespace WindhawkUtils {
-    template <typename T, typename D, typename O>
-    inline bool SetFunctionHook(T target, D detour, O original) {
-        if (!target) return false;
-        if (MH_CreateHook(reinterpret_cast<LPVOID>(target),
-                          reinterpret_cast<LPVOID>(detour),
-                          reinterpret_cast<LPVOID*>(original)) == MH_OK) {
-            return MH_EnableHook(reinterpret_cast<LPVOID>(target)) == MH_OK;
-        }
-        return false;
-    }
-
-    struct SYMBOL_HOOK {
-        struct {
-            const wchar_t* name;
-        } symbols[1];
-        void* pOriginal;
-        void* hook;
-    };
-}
-
-static bool HookSymbols(HMODULE module, WindhawkUtils::SYMBOL_HOOK* hooks, size_t count,
-                        const wchar_t* typeName) {
-    if (!module || !hooks || count == 0) {
-        LogDock(L"HookSymbols: invalid arguments");
-        return false;
-    }
-
-    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(module);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
-    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
-        reinterpret_cast<const BYTE*>(module) + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
-    const DWORD imageSize = nt->OptionalHeader.SizeOfImage;
-    const DWORD imageTimestamp = nt->FileHeader.TimeDateStamp;
-
-    wchar_t cacheBase[MAX_PATH] = {};
-    DWORD cacheBaseLen = GetEnvironmentVariableW(
-        L"LOCALAPPDATA", cacheBase, ARRAYSIZE(cacheBase));
-    std::wstring offsetCachePath;
-    if (cacheBaseLen > 0 && cacheBaseLen < ARRAYSIZE(cacheBase)) {
-        std::wstring appDir = std::wstring(cacheBase) + L"\\Lightency";
-        CreateDirectoryW(appDir.c_str(), nullptr);
-        offsetCachePath = appDir + L"\\hook_offsets.ini";
-    }
-
-    uint64_t typeHash = 1469598103934665603ull;
-    for (const wchar_t* p = typeName; *p; ++p) {
-        typeHash ^= static_cast<uint16_t>(*p);
-        typeHash *= 1099511628211ull;
-    }
-    const std::wstring cacheSection = L"image_" + std::to_wstring(imageTimestamp) +
-        L"_" + std::to_wstring(imageSize);
-    auto cacheKey = [&](size_t index) {
-        return L"hook_" + std::to_wstring(typeHash) + L"_" + std::to_wstring(index);
-    };
-    auto isExecutableAddress = [](const void* address) {
-        MEMORY_BASIC_INFORMATION mbi{};
-        if (!VirtualQuery(address, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) return false;
-        const DWORD protection = mbi.Protect & 0xff;
-        return protection == PAGE_EXECUTE || protection == PAGE_EXECUTE_READ ||
-               protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY;
-    };
-
-
-    if (!offsetCachePath.empty()) {
-        std::vector<DWORD64> cachedAddresses(count, 0);
-        bool cacheComplete = true;
-        for (size_t i = 0; i < count; ++i) {
-            wchar_t value[32] = {};
-            GetPrivateProfileStringW(cacheSection.c_str(), cacheKey(i).c_str(), L"",
-                                     value, ARRAYSIZE(value), offsetCachePath.c_str());
-            wchar_t* end = nullptr;
-            const unsigned long long rva = wcstoull(value, &end, 16);
-            if (!value[0] || !end || *end || rva == 0 || rva >= imageSize) {
-                cacheComplete = false;
-                break;
-            }
-            const auto address = reinterpret_cast<DWORD64>(module) + rva;
-            if (!isExecutableAddress(reinterpret_cast<const void*>(address))) {
-                cacheComplete = false;
-                break;
-            }
-            cachedAddresses[i] = address;
-        }
-        if (cacheComplete) {
-            bool allHooked = true;
-            for (size_t i = 0; i < count; ++i) {
-                void* target = reinterpret_cast<void*>(cachedAddresses[i]);
-                const MH_STATUS createStatus = MH_CreateHook(
-                    target, hooks[i].hook, reinterpret_cast<LPVOID*>(hooks[i].pOriginal));
-                const MH_STATUS enableStatus = createStatus == MH_OK
-                    ? MH_EnableHook(target) : createStatus;
-                if (createStatus != MH_OK || enableStatus != MH_OK) allHooked = false;
-            }
-            if (allHooked) {
-                LogDock(L"HookSymbols: validated offset cache hit");
-            }
-            return allHooked;
-        }
-    }
-
-    HANDLE hProcess = GetCurrentProcess();
-    static bool s_symInited = false;
-    static decltype(&SymSetOptions) pSymSetOptions = nullptr;
-    static decltype(&SymInitializeW) pSymInitializeW = nullptr;
-    static decltype(&SymLoadModuleExW) pSymLoadModuleExW = nullptr;
-    static decltype(&SymEnumSymbolsW) pSymEnumSymbolsW = nullptr;
-    if (!s_symInited) {
-        wchar_t curDir[MAX_PATH] = {};
-        HMODULE hThis = NULL;
-        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            (LPCWSTR)&HookSymbols, &hThis);
-        if (hThis) {
-            GetModuleFileNameW(hThis, curDir, MAX_PATH);
-            wchar_t* pLast = wcsrchr(curDir, L'\\');
-            if (pLast) *pLast = L'\0';
-        }
-
-        std::wstring dbgHelpPath = std::wstring(curDir) + L"\\dbghelp.dll";
-        HMODULE dbgHelp = LoadLibraryExW(
-            dbgHelpPath.c_str(), nullptr,
-            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-        if (!dbgHelp) dbgHelp = LoadLibraryW(L"dbghelp.dll");
-        if (!dbgHelp) return false;
-
-        pSymSetOptions = reinterpret_cast<decltype(pSymSetOptions)>(
-            GetProcAddress(dbgHelp, "SymSetOptions"));
-        pSymInitializeW = reinterpret_cast<decltype(pSymInitializeW)>(
-            GetProcAddress(dbgHelp, "SymInitializeW"));
-        pSymLoadModuleExW = reinterpret_cast<decltype(pSymLoadModuleExW)>(
-            GetProcAddress(dbgHelp, "SymLoadModuleExW"));
-        pSymEnumSymbolsW = reinterpret_cast<decltype(pSymEnumSymbolsW)>(
-            GetProcAddress(dbgHelp, "SymEnumSymbolsW"));
-        if (!pSymSetOptions || !pSymInitializeW || !pSymLoadModuleExW ||
-            !pSymEnumSymbolsW) return false;
-
-        pSymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_AUTO_PUBLICS |
-                       SYMOPT_FAIL_CRITICAL_ERRORS | SYMOPT_NO_PROMPTS);
-
-
-        std::wstring symSrvPath = std::wstring(curDir) + L"\\symsrv.dll";
-        LoadLibraryW(symSrvPath.c_str());
-
-        wchar_t localAppData[MAX_PATH] = {};
-        DWORD localAppDataLen = GetEnvironmentVariableW(
-            L"LOCALAPPDATA", localAppData, ARRAYSIZE(localAppData));
-        std::wstring cacheDir;
-        if (localAppDataLen > 0 && localAppDataLen < ARRAYSIZE(localAppData)) {
-            std::wstring appDir = std::wstring(localAppData) + L"\\Lightency";
-            CreateDirectoryW(appDir.c_str(), nullptr);
-            cacheDir = appDir + L"\\symbols";
-        } else {
-            cacheDir = std::wstring(curDir) + L"\\symbols";
-        }
-        CreateDirectoryW(cacheDir.c_str(), nullptr);
-
-        std::wstring searchPath = std::wstring(curDir) + L";" + cacheDir +
-            L";SRV*" + cacheDir + L"*https://msdl.microsoft.com/download/symbols";
-        BOOL bInit = pSymInitializeW(hProcess, searchPath.c_str(), FALSE);
-        LogDock(std::wstring(L"SymInitializeW: bInit=") + std::to_wstring(bInit));
-        if (!bInit) return false;
-        s_symInited = true;
-    }
-
-    wchar_t modPath[MAX_PATH] = {};
-    GetModuleFileNameW(module, modPath, MAX_PATH);
-    DWORD64 base = pSymLoadModuleExW(hProcess, NULL, modPath, NULL, (DWORD64)module, 0, NULL, 0);
-    LogDock(std::wstring(L"SymLoadModuleExW base=") + std::to_wstring((unsigned long long)base));
-    if (!base) base = (DWORD64)module;
-
-    struct EnumCtx {
-        bool isMoved;
-        DWORD64 foundAddr;
-        std::wstring matchedName;
-        const wchar_t* typeName;
-    };
-
-    auto EnumSym = [](PSYMBOL_INFOW pSymInfo, ULONG, PVOID userCtx) -> BOOL {
-        EnumCtx* pCtx = (EnumCtx*)userCtx;
-        if (pSymInfo->Name[0] != L'`' &&
-            wcsstr(pSymInfo->Name, L"winrt::impl::produce<") &&
-            wcsstr(pSymInfo->Name, pCtx->typeName) &&
-            !wcsstr(pSymInfo->Name, L"catch") &&
-            !wcsstr(pSymInfo->Name, L"dtor") &&
-            !wcsstr(pSymInfo->Name, L"lambda")) {
-            if (pCtx->isMoved && wcsstr(pSymInfo->Name, L"OnPointerMoved")) {
-                pCtx->foundAddr = pSymInfo->Address;
-                pCtx->matchedName = pSymInfo->Name;
-                return FALSE;
-            }
-            if (!pCtx->isMoved && wcsstr(pSymInfo->Name, L"OnPointerExited")) {
-                pCtx->foundAddr = pSymInfo->Address;
-                pCtx->matchedName = pSymInfo->Name;
-                return FALSE;
-            }
-        }
-        return TRUE;
-    };
-
-    bool allHooked = true;
-    for (size_t i = 0; i < count; i++) {
-        EnumCtx ctx = {};
-        ctx.isMoved = (i == 0);
-        ctx.typeName = typeName;
-        std::wstring mask = std::wstring(L"*produce*") + typeName +
-            (i == 0 ? L"*OnPointerMoved*" : L"*OnPointerExited*");
-        pSymEnumSymbolsW(hProcess, base, mask.c_str(), (PSYM_ENUMERATESYMBOLS_CALLBACKW)EnumSym, &ctx);
-        LogDock(std::wstring(L"SymEnumSymbolsW [") + std::to_wstring(i) + L"] name=" + ctx.matchedName + L" foundAddr=" + std::to_wstring((unsigned long long)ctx.foundAddr) + L" RVA=0x" + std::to_wstring((unsigned long long)(ctx.foundAddr ? ctx.foundAddr - base : 0)));
-
-        if (ctx.foundAddr) {
-            void* pTarget = (void*)ctx.foundAddr;
-            MH_STATUS sCreate = MH_CreateHook(pTarget, hooks[i].hook, (LPVOID*)hooks[i].pOriginal);
-            MH_STATUS sEnable = MH_EnableHook(pTarget);
-            LogDock(std::wstring(L"MH_CreateHook=") + std::to_wstring(sCreate) + L" MH_EnableHook=" + std::to_wstring(sEnable));
-            if (sCreate != MH_OK || sEnable != MH_OK) {
-                allHooked = false;
-            } else if (!offsetCachePath.empty()) {
-                wchar_t rvaValue[32] = {};
-                swprintf_s(rvaValue, L"%llX",
-                           static_cast<unsigned long long>(ctx.foundAddr - base));
-                WritePrivateProfileStringW(cacheSection.c_str(), cacheKey(i).c_str(),
-                                           rvaValue, offsetCachePath.c_str());
-            }
-        } else {
-            allHooked = false;
-        }
-    }
-    return allHooked;
-}
-
-
-#undef GetCurrentTime
-
-#include <windows.h>
-#include <commctrl.h>
-#pragma comment(lib, "comctl32.lib")
-
-#include <winrt/Windows.Foundation.h>
 
 #include <winrt/Windows.Foundation.Collections.h>
 
@@ -1098,6 +851,15 @@ struct DockAnimationContext {
 
 std::map<void*, DockAnimationContext> g_contexts;
 
+struct XamlPointerSubscription {
+    winrt::weak_ref<FrameworkElement> element;
+    Input::PointerEventHandler moved{nullptr};
+    Input::PointerEventHandler exited{nullptr};
+    winrt::event_token movedToken{};
+    winrt::event_token exitedToken{};
+};
+static std::map<void*, XamlPointerSubscription> g_xamlSubscriptions;
+
 
 void LoadSettings();
 
@@ -1120,7 +882,6 @@ void OnCompositionTargetRendering(winrt::Windows::Foundation::IInspectable const
 
 HMODULE GetTaskbarViewModuleHandle();
 
-bool HookTaskbarViewDllSymbols(HMODULE module);
 
 static bool RebaseIconGeometryFast(DockAnimationContext& ctx);
 
@@ -3313,182 +3074,6 @@ HMODULE GetTaskbarViewModuleHandle() {
 
 }
 
-HMODULE GetSystemTrayModuleHandle() {
-    return GetModuleHandleW(L"SystemTray.dll");
-}
-
-bool HookSystemTrayDllSymbols(HMODULE module) {
-    WindhawkUtils::SYMBOL_HOOK hooks[] = {
-        {
-            { LR"(SystemTray IconView OnPointerMoved)" },
-            &SystemTrayIcon_OnPointerMoved_Original,
-            SystemTrayIcon_OnPointerMoved_Hook,
-        },
-    };
-
-    bool iconHooked = HookSymbols(
-        module, hooks, ARRAYSIZE(hooks),
-        L"implementation::IconView,winrt::Windows::UI::Xaml::Controls::IControlOverrides");
-
-    WindhawkUtils::SYMBOL_HOOK frameHooks[] = {
-        {
-            { LR"(SystemTray SystemTrayFrame OnPointerMoved)" },
-            &SystemTrayFrame_OnPointerMoved_Original,
-            SystemTrayFrame_OnPointerMoved_Hook,
-        },
-    };
-    bool frameHooked = HookSymbols(
-        module, frameHooks, ARRAYSIZE(frameHooks),
-        L"implementation::SystemTrayFrame,winrt::Windows::UI::Xaml::Controls::IControlOverrides");
-    return iconHooked || frameHooked;
-}
-
-
-bool HookTaskbarViewDllSymbols(HMODULE module) {
-
-
-    WindhawkUtils::SYMBOL_HOOK taskbarViewHooks[] = {
-
-        {
-
-            {
-
-                LR"(public: virtual int __cdecl winrt::impl::produce<struct winrt::Taskbar::implementation::TaskbarFrame,struct winrt::Windows::UI::Xaml::Controls::IControlOverrides>::OnPointerMoved(void *))"
-
-            },
-
-            &TaskbarFrame_OnPointerMoved_Original,
-
-            TaskbarFrame_OnPointerMoved_Hook,
-
-        },
-
-        {
-
-            {
-
-                LR"(public: virtual int __cdecl winrt::impl::produce<struct winrt::Taskbar::implementation::TaskbarFrame,struct winrt::Windows::UI::Xaml::Controls::IControlOverrides>::OnPointerExited(void *))"
-
-            },
-
-            &TaskbarFrame_OnPointerExited_Original,
-
-            TaskbarFrame_OnPointerExited_Hook,
-
-        },
-
-    };
-
-    if (!HookSymbols(module, taskbarViewHooks, ARRAYSIZE(taskbarViewHooks), L"TaskbarFrame")) {
-
-        Wh_Log(L"DockAnimation: HookSymbols failed.");
-
-        return false;
-
-    }
-
-    Wh_Log(L"DockAnimation: HookSymbols succeeded (Pointer events only).");
-
-    return true;
-
-}
-
-
-using LoadLibraryExW_t = decltype(&LoadLibraryExW);
-
-LoadLibraryExW_t LoadLibraryExW_Original;
-
-
-HMODULE WINAPI LoadLibraryExW_Hook(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags) {
-
-    HMODULE module = LoadLibraryExW_Original(lpLibFileName, hFile, dwFlags);
-
-    if (!module) return module;
-
-    if (!g_taskbarViewDllLoaded && GetTaskbarViewModuleHandle() == module) {
-
-        if (!g_taskbarViewDllLoaded.exchange(true)) {
-
-            Wh_Log(L"DockAnimation: Taskbar.View.dll loaded, hooking symbols...");
-
-            if (HookTaskbarViewDllSymbols(module)) {
-
-                if (!g_hooksApplied.exchange(true)) {
-
-
-                    Wh_Log(L"DockAnimation: Hooks applied (slow path).");
-
-                }
-
-            }
-
-        }
-
-    }
-
-    return module;
-
-}
-
-
-BOOL Wh_ModInit() {
-
-    Wh_Log(L"DockAnimation: Wh_ModInit");
-
-    LoadSettings();
-
-    if (!g_startMenuWinEventHook) {
-        g_startMenuWinEventHook = SetWinEventHook(
-            EVENT_OBJECT_SHOW, EVENT_OBJECT_LOCATIONCHANGE, nullptr,
-            StartMenuWinEventProc, 0, 0,
-            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
-    }
-
-    if (HMODULE taskbarViewModule = GetTaskbarViewModuleHandle()) {
-
-        g_taskbarViewDllLoaded = true;
-
-        if (!HookTaskbarViewDllSymbols(taskbarViewModule)) return FALSE;
-
-    } else {
-
-        HMODULE kernelBaseModule = GetModuleHandle(L"kernelbase.dll");
-
-        auto pKernelBaseLibraryExW =
-
-            (decltype(&LoadLibraryExW))GetProcAddress(kernelBaseModule, "LoadLibraryExW");
-
-        WindhawkUtils::SetFunctionHook(
-
-            pKernelBaseLibraryExW,
-
-            LoadLibraryExW_Hook,
-
-            &LoadLibraryExW_Original);
-
-    }
-
-    return TRUE;
-
-}
-
-
-void Wh_ModAfterInit() {
-
-    Wh_Log(L"DockAnimation: Wh_ModAfterInit");
-
-
-    if (g_taskbarViewDllLoaded) {
-
-        g_hooksApplied = true;
-
-        Wh_Log(L"DockAnimation: Hooks already applied by Windhawk (fast path).");
-
-    }
-
-}
-
-
 typedef void (*RunFromWindowThreadProc_t)(PVOID);
 
 
@@ -3583,6 +3168,25 @@ bool RunFromWindowThread(HWND hWnd,
 void Wh_ModBeforeUninit() {
 
     Wh_Log(L"DockAnimation: Wh_ModBeforeUninit (safe cleanup)");
+    for (auto& [key, subscription] : g_xamlSubscriptions) {
+        HWND hWnd = FindWindowW(L"Shell_TrayWnd", nullptr);
+        auto itCtx = g_contexts.find(key);
+        if (itCtx != g_contexts.end() && itCtx->second.hWnd) {
+            hWnd = itCtx->second.hWnd;
+        }
+        if (hWnd) {
+            RunFromWindowThread(hWnd, [](PVOID data) {
+                auto* sub = static_cast<XamlPointerSubscription*>(data);
+                try {
+                    if (auto element = sub->element.get()) {
+                        element.PointerMoved(sub->movedToken);
+                        element.PointerExited(sub->exitedToken);
+                    }
+                } catch (...) {}
+            }, &subscription);
+        }
+    }
+    g_xamlSubscriptions.clear();
 
     if (g_startMenuWinEventHook) {
         UnhookWinEvent(g_startMenuWinEventHook);
@@ -3784,22 +3388,65 @@ void Wh_ModSettingsChanged() {
 
 namespace Lightency {
 
+void DockAnimation::AttachXamlElement(IUnknown* object) {
+    if (!object) return;
+    try {
+        FrameworkElement element{nullptr};
+        if (FAILED(object->QueryInterface(winrt::guid_of<FrameworkElement>(), winrt::put_abi(element)))) return;
+        const auto type = winrt::get_class_name(element);
+        const bool taskbar = type == L"Taskbar.TaskbarFrame";
+        if (!taskbar && type != L"SystemTray.SystemTrayFrame") return;
+        auto key = winrt::get_abi(element);
+        if (g_xamlSubscriptions.contains(key)) return;
+        EnsureLiveConfigMapped();
+        ApplyTaskbarAppearance(element);
+        ApplyTrayItemVisibility(element);
+        InitializeAnimationHooks(key, element);
+        XamlPointerSubscription subscription;
+        subscription.element = element;
+        subscription.moved = [key, taskbar, weak = winrt::make_weak(element)](
+            auto const&, Input::PointerRoutedEventArgs const& args) {
+            try {
+                auto frame = weak.get();
+                if (!frame) return;
+                EnsureLiveConfigMapped();
+                ApplyTaskbarAppearance(frame);
+                ApplyTrayItemVisibility(frame);
+                if (HandleLayoutPointerMove(frame, args)) return;
+                if (taskbar && g_lightencyDockConfig.dockAnimation) OnTaskbarPointerMoved(key, args);
+                else if (taskbar) OnTaskbarPointerExited(key);
+            } catch (winrt::hresult_error const& error) {
+                LogDock(L"XAML pointer error: " + std::wstring(error.message()));
+            }
+        };
+        subscription.exited = [key](auto const&, auto const&) { OnTaskbarPointerExited(key); };
+        subscription.movedToken = element.PointerMoved(subscription.moved);
+        try {
+            subscription.exitedToken = element.PointerExited(subscription.exited);
+        } catch (...) {
+            element.PointerMoved(subscription.movedToken);
+            throw;
+        }
+        g_xamlSubscriptions.emplace(key, std::move(subscription));
+        LogDock(L"XAML element attached: " + std::wstring(type));
+    } catch (winrt::hresult_error const& error) {
+        LogDock(L"XAML attach failed: " + std::wstring(error.message()));
+    }
+}
+
 bool DockAnimation::Initialize() {
     LogDock(L"DockAnimation::Initialize start");
-    static bool s_minHookInited = false;
-    if (!s_minHookInited) {
-        MH_STATUS s = MH_Initialize();
-        LogDock(std::wstring(L"MH_Initialize=") + std::to_wstring(s));
-        s_minHookInited = true;
+    LoadSettings();
+    if (!g_startMenuWinEventHook) {
+        g_startMenuWinEventHook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_LOCATIONCHANGE,
+            nullptr, StartMenuWinEventProc, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     }
-    BOOL bInit = Wh_ModInit();
-    LogDock(std::wstring(L"Wh_ModInit result=") + std::to_wstring(bInit));
-    Wh_ModAfterInit();
-    return bInit != FALSE;
+    return XamlBridge::Initialize();
 }
 
 void DockAnimation::Shutdown() {
     LogDock(L"DockAnimation::Shutdown");
+    XamlBridge::Shutdown();
     Wh_ModBeforeUninit();
 }
 

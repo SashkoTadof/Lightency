@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(lightency VERSION 1.0.0 LANGUAGES C CXX)
+project(lightency VERSION 1.0.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,14 +13,12 @@ if (MSVC)
 endif()
 
 add_library(lightency_hook SHARED
+    src/hook/lightency_hook.def
     src/hook/lightency_hook.rc
     src/hook/dllmain.cpp
+    src/hook/xaml_bridge.cpp
     src/hook/dock_animation.cpp
     src/hook/dock_animation.h
-    src/hook/minhook/buffer.c
-    src/hook/minhook/hook.c
-    src/hook/minhook/trampoline.c
-    src/hook/minhook/hde64.c
     src/common/composition.cpp
     src/common/composition.h
     src/common/types.h
@@ -28,7 +26,6 @@ add_library(lightency_hook SHARED
 
 target_include_directories(lightency_hook PRIVATE
     src/hook
-    src/hook/minhook
 )
 
 target_link_libraries(lightency_hook PRIVATE

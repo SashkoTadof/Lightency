@@ -18,8 +18,4 @@ std::wstring PayloadManager::GetHookDllPath() {
     return GetModuleDir() + L"lightency_hook.dll";
 }
 
-std::wstring PayloadManager::GetSymSrvDllPath() {
-    return GetModuleDir() + L"symsrv.dll";
-}
-
 }

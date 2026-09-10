@@ -4,8 +4,8 @@
 #include <string>
 
 #define WM_LIGHTENCY_APPLY (WM_APP + 0x4242)
-#define LIGHTENCY_VERSION L"v1.0.0"
-#define LIGHTENCY_VERSION_STR "1.0.0"
+#define LIGHTENCY_VERSION L"v1.0.1"
+#define LIGHTENCY_VERSION_STR "1.0.1"
 
 enum class TaskbarEffect : int {
     Normal = 0,
