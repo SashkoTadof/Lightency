@@ -637,8 +637,8 @@ static void PaintWindow(HWND hWnd) {
                 Font chevronFont(g_fonts->segoeUI.get(), 17.0f * scale, FontStyleRegular, UnitPixel);
                 SolidBrush chevronBrush(Color(255, 170, 180, 188));
                 g.DrawString(L"›", -1, &chevronFont,
-                    RectF(buffer.width - padX - 24.0f * scale, ry, 24.0f * scale, rowH),
-                    &vCenterFmt, &chevronBrush);
+                    RectF(buffer.width - padX - 38.0f * scale, ry, 36.0f * scale, rowH),
+                    &centerFmt, &chevronBrush);
             } else if (items[i].type == RowType::Stepper && items[i].pIntValue) {
                 DrawNativeStepper(g, buffer.width - padX - 94.0f * scale, ry + (rowH - 22.0f * scale) / 2.0f, scale, *(items[i].pIntValue), items[i].unit, isHovered ? g_hoveredStepperBtn : 0, items[i].displayOverride, items[i].disabled);
             } else if (items[i].type == RowType::Segmented) {
