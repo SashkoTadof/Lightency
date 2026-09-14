@@ -12,6 +12,9 @@
 #include <vector>
 #include "../common/diagnostics.h"
 
+// Note: Dock animation lifecycle and physics baseline were partially adapted from
+// https://windhawk.net/mods/taskbar-dock-animation (Taskbar Dock Animation by m417z),
+// refactored and decoupled for standalone native WinRT XAML diagnostics.
 #define WH_MOD_ID L"lightency_dock"
 
 static inline void LogDock(const std::wstring&) {}
@@ -1272,6 +1275,9 @@ static void PrepareHighResolutionIconSources(FrameworkElement const& root,
 }
 
 
+// Note: Core dock animation wave equations and lifecycle hooks were partially adapted
+// from the Taskbar Dock Animation mod by m417z (https://windhawk.net/mods/taskbar-dock-animation),
+// re-engineered for standalone native WinRT XAML diagnostics.
 double CalculateScale(double distance, double radius, double maxScale) {
 
     if (!g_lightencyDockConfig.dockAnimation || maxScale <= 1.0) return 1.0;
@@ -3360,6 +3366,7 @@ bool RunFromWindowThread(HWND hWnd,
 }
 
 
+// Wh_* lifecycle hooks and callbacks partially adapted from Windhawk Taskbar Dock Animation mod base.
 void Wh_ModBeforeUninit() {
 
     Wh_Log(L"DockAnimation: Wh_ModBeforeUninit (safe cleanup)");
