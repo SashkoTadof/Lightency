@@ -394,6 +394,7 @@ void Injector::Shutdown() {
     if (s_pSharedMemory) {
         auto* pCfg = static_cast<SharedHookConfig*>(s_pSharedMemory);
         pCfg->dockAnimation = false;
+        pCfg->startMenuSizing = false;
         pCfg->masterPid = 0;
     }
 

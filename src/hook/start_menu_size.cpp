@@ -391,6 +391,16 @@ bool RefreshSettings() {
         }
         auto content = window.Content().try_as<FrameworkElement>();
         if (!content) return false;
+
+        if (!g_settings.enabled) {
+            RestoreHiddenElements();
+            if (g_layoutToken) {
+                content.LayoutUpdated(g_layoutToken);
+                g_layoutToken = {};
+            }
+            return true;
+        }
+
         if (!g_layoutToken) {
             g_layoutToken = content.LayoutUpdated([](auto&&, auto&&) { Apply(); });
         }

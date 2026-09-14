@@ -152,6 +152,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(StartExtensionWorker), &hSelf);
             StartExtensionWorker(hSelf);
         }
+    } else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
+        if (IsStartMenuProcess()) {
+            Lightency::StartMenuSize::Shutdown();
+        }
     }
     return TRUE;
 }
