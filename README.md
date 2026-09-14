@@ -7,28 +7,28 @@ Windows 11 taskbar and start menu customization in native C++20.
 ## Features
 
 - **Dock animation**: icon scaling on mouse hover with macOS-style wave expansion and bounce.
-- **Transparent taskbar**: clear taskbar background and remove top border line.
+- **Transparent taskbar**: clear taskbar background and remove top border line (compatible with modern Windows 11 builds).
 - **Start button styling**: custom icon color, accent color matching, size, and position offset.
 - **Start menu cleanup**: toggle visibility of search box, pinned items, recommended section, user profile, and power buttons.
-- **Drag-and-drop assist**: hover over taskbar icons while dragging a file to bring the target window to foreground.
+- **Drag-and-drop assist**: hover over taskbar icons while dragging a file to bring the target window to foreground via low-level mouse hooks.
 - **System tray**: hide individual tray icons (chevron, network, volume, battery, clock).
-- **Window animations & borders**: custom minimize animation and window border toggle (beta).
-- **Portable**: standalone executables, no installer, no background runtime or electron bloat.
+- **Window animations & borders**: custom minimize animation and exact window border color restoration.
+- **Portable**: standalone executables, no installer, no background services.
 
 ## Architecture
 
 Lightency consists of two parts:
 
-- `lightency.exe`: Win32 controller, settings GUI, system tray icon, and updater.
+- `lightency.exe`: Win32 controller, settings GUI, system tray icon, and self-updater.
 - `lightency_hook.dll`: injected module running inside `explorer.exe` and `StartMenuExperienceHost.exe`.
 
 ### How it works
 
-1. **Injection**: `lightency.exe` sets thread hooks (`SetWindowsHookExW` with `WH_CALLWNDPROC` and `WH_GETMESSAGE`) on the taskbar and start menu threads. Windows loads `lightency_hook.dll` into target processes upon message dispatch. No `CreateRemoteThread` or `WriteProcessMemory` is used.
-2. **XAML access**: `lightency_hook.dll` hooks into the visual tree using the native `InitializeXamlDiagnosticsEx` API. It reads and modifies WinRT XAML elements in-process without downloading symbol files (PDBs).
-3. **IPC**: Settings are synced between `lightency.exe` and `lightency_hook.dll` in real time via shared memory (`CreateFileMappingW` / `MapViewOfFile`).
-4. **Network**: The core tool and DLL never access the network. Network requests are only made when checking for updates via the GitHub Releases API.
-5. **Exit**: On close, event handlers (`PointerMoved`, `CompositionTarget::Rendering`) are detached, element transforms are restored to stock layout, and the DLL unhooks.
+1. **Injection**: `lightency.exe` sets thread hooks (`SetWindowsHookExW` with `WH_CALLWNDPROC` and `WH_GETMESSAGE`) on taskbar and start menu threads. Hooks initialize lazily on IPC messages without thread creation inside `DllMain`.
+2. **XAML access**: `lightency_hook.dll` hooks into the visual tree using the native `InitializeXamlDiagnosticsEx` API, modifying WinRT XAML elements in-process.
+3. **IPC**: Settings are synchronized in real-time via lock-free atomic shared memory (`CreateFileMappingW` / `MapViewOfFile` with seqlock).
+4. **Updater**: Performs atomic updates via `MoveFileW` with strict HTTPS enforcement, expected size validation, and native JSON parsing.
+5. **Exit**: Event handlers and timers are detached, element transforms are restored, and hooks cleanly unregister.
 
 ## Download & Usage
 
@@ -39,9 +39,8 @@ Settings can be opened from the system tray icon.
 
 ## Requirements & Notes
 
-- **OS**: Windows 11 64-bit.
-- **Permissions**: Runs as a standard user. Administrator privileges may be needed if you interact with elevated windows or if your system restricts UI thread hooks.
-- **Antivirus notice**: Unsigned DLLs injected into Explorer via `SetWindowsHookExW` may trigger heuristic false positives in some security software.
+- **OS**: Windows 11 64-bit (including 24H2 / build 26200+).
+- **Permissions**: Standard user permissions. Elevated privileges may be required when interacting with administrator windows.
 
 ## Build
 
