@@ -1,10 +1,10 @@
 # Lightency
 
-Native Windows 11 taskbar customization with a minimal footprint and zero latency.
+Native Windows 11 taskbar customization designed for minimal latency and low overhead.
 
 **Windows 11 · x64 · Native C++20 · Portable**
 
-> Customization should never cost you input latency or FPS.
+> Customization should feel native, responsive, and stay out of the way of your frame rate.
 
 <p align="center">
   <img src="assets/screenshots/main.png" width="380" alt="Lightency settings">
@@ -40,13 +40,27 @@ Customize the Start button appearance with a smooth hue color picker, custom siz
 - **Lightweight & Portable**: Native executable and taskbar extension, no Electron/browser runtime or installer.
 - **Built-in updater**: Fast in-app update check and release installer.
 
-## How it works
+## Architecture & How It Works
 
-Unlike traditional mods that rely on downloading external debugging symbols (PDBs) or hooking undocumented internal functions, Lightency connects directly through the native **WinRT XAML Diagnostics** engine (InitializeXamlDiagnosticsEx):
-- **Instant startup**: Element discovery completes in ~4 ms.
-- **Zero network overhead**: No symbol downloads, no Microsoft symbol server dependency, 100% offline.
-- **Broad compatibility**: Seamless operation across various Windows 11 builds and PC configurations.
-- **Clean lifecycle**: Event subscriptions are detached when exiting, restoring the standard taskbar immediately.
+Lightency consists of two coordinated native components:
+
+- **`lightency.exe`** (Controller & UI):
+  A standalone Win32 application that provides the settings GUI, manages the system tray icon, polls for GitHub releases, and monitors shell host processes.
+- **`lightency_hook.dll`** (Shell Extension):
+  A native C++20 library loaded into `explorer.exe` and `StartMenuExperienceHost.exe`.
+
+### Execution Flow
+
+1. **Standard Shell Hooks**:
+   `lightency.exe` installs standard Windows thread hooks (`SetWindowsHookExW` with `WH_CALLWNDPROC` and `WH_GETMESSAGE`) targeting the shell tray and start menu threads. When messages are dispatched, the operating system naturally loads `lightency_hook.dll` into the process space. No `CreateRemoteThread`, `WriteProcessMemory`, or binary symbol patching is used.
+2. **WinRT XAML Diagnostics**:
+   Rather than downloading Microsoft debugging symbols (PDBs) or hardcoding function offsets that break on monthly Windows updates, `lightency_hook.dll` connects to the taskbar visual tree through the official Windows `InitializeXamlDiagnosticsEx` API. Visual elements are queried directly in-process.
+3. **Inter-Process Configuration (IPC)**:
+   Configuration parameters and toggle states are synchronized in real time between the controller and the hook using shared memory (`CreateFileMappingW` / `MapViewOfFile`), eliminating disk I/O and pipe latency.
+4. **Network Access**:
+   The hook and core engine run completely offline and never initiate network traffic. The only component with network access is the optional, user-triggered updater inside `lightency.exe`, which queries the public GitHub Releases API.
+5. **Teardown & Cleanup**:
+   On application exit, window messages instruct the hook to detach XAML event handlers (`PointerMoved`, `LayoutUpdated`, `CompositionTarget::Rendering`), reset element transforms back to stock taskbar geometry, and gracefully unload.
 
 ## Installation
 
@@ -59,10 +73,10 @@ Unlike traditional mods that rely on downloading external debugging symbols (PDB
 ## Compatibility & Requirements
 
 - **OS**: Windows 11 (x64)
-- **Privileges**: Standard user privileges (or Administrator if running elevated apps)
-- **Displays**: Full Per-Monitor DPI scaling support (V2)
+- **Privileges**: Standard user privileges for typical desktop sessions. Running as Administrator may be required if managing windows of elevated applications or if specific Windows security policies restrict thread message hooks.
+- **Displays**: Full Per-Monitor DPI scaling support (V2).
 
-> **Note:** Unsigned Explorer extensions may occasionally trigger generic antivirus warnings because the extension operates within the Explorer process space. Lightency does not use dangerous injection techniques such as CreateRemoteThread or WriteProcessMemory.
+> **Note:** Unsigned shell extensions may occasionally trigger generic antivirus heuristics because code is executed in the `explorer.exe` process space via standard window hooks. Lightency uses standard Windows APIs (`SetWindowsHookExW`) and does not employ process injection routines.
 
 ## Building from source
 
