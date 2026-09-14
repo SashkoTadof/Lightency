@@ -12,7 +12,7 @@ if %errorlevel% neq 0 (
     )
 )
 
-set "VERSION=1.1.0"
+set "VERSION=1.1.1"
 for /f "tokens=3" %%v in ('findstr /i "project.*VERSION" CMakeLists.txt') do set "VERSION=%%v"
 
 set "BUILD_DIR=.build"

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(lightency VERSION 1.1.0 LANGUAGES C CXX)
+project(lightency VERSION 1.1.1 LANGUAGES C CXX)
 option(LIGHTENCY_DIAGNOSTICS "Enable runtime diagnostic logs" OFF)
 
 set(CMAKE_CXX_STANDARD 20)

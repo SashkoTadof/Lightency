@@ -19,11 +19,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "SashkoTadof"
             VALUE "FileDescription", "Lightency taskbar customization"
-            VALUE "FileVersion", "1.1.0"
+            VALUE "FileVersion", "1.1.1"
             VALUE "InternalName", "lightency"
             VALUE "OriginalFilename", "lightency.exe"
             VALUE "ProductName", "Lightency"
-            VALUE "ProductVersion", "1.1.0"
+            VALUE "ProductVersion", "1.1.1"
             VALUE "LegalCopyright", "Copyright (C) 2026 Lightency contributors"
         END
     END

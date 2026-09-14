@@ -50,7 +50,7 @@ Unlike traditional mods that rely on downloading external debugging symbols (PDB
 
 ## Installation
 
-1. Download `Lightency-1.1.0-win-x64.zip` from [Releases](https://github.com/SashkoTadof/Lightency/releases).
+1. Download `Lightency-1.1.1-win-x64.zip` from [Releases](https://github.com/SashkoTadof/Lightency/releases).
 2. Extract the archive into any folder.
 3. Launch `lightency.exe`.
 
