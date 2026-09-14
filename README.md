@@ -1,93 +1,58 @@
 # Lightency
 
-Native Windows 11 taskbar customization designed for minimal latency and low overhead.
+Windows 11 taskbar and start menu customization in native C++20.
 
-**Windows 11 · x64 · Native C++20 · Portable**
-
-> Customization should feel native, responsive, and stay out of the way of your frame rate.
-
-<p align="center">
-  <img src="assets/screenshots/main.png" width="380" alt="Lightency settings">
-</p>
+![Lightency settings](assets/screenshots/main.png)
 
 ## Features
 
-### Dock Animation & Physics
-macOS-style dock hover magnification, icon bounce on click, and adaptive wave physics with custom curve, radius, and scaling controls.
+- **Dock animation**: icon scaling on mouse hover with macOS-style wave expansion and bounce.
+- **Transparent taskbar**: clear taskbar background and remove top border line.
+- **Start button styling**: custom icon color, accent color matching, size, and position offset.
+- **Start menu cleanup**: toggle visibility of search box, pinned items, recommended section, user profile, and power buttons.
+- **Drag-and-drop assist**: hover over taskbar icons while dragging a file to bring the target window to foreground.
+- **System tray**: hide individual tray icons (chevron, network, volume, battery, clock).
+- **Window animations & borders**: custom minimize animation and window border toggle (beta).
+- **Portable**: standalone executables, no installer, no background runtime or electron bloat.
 
-<p align="center">
-  <img src="assets/screenshots/dock-animation.png" width="380" alt="Dock animation settings">
-</p>
+## Architecture
 
-- **Clear taskbar**: Instant transparent taskbar with optional border removal.
-- **Fluid dock animation**: macOS-style dock hover magnification and icon click bounce.
-- **Fine-tuned physics**: Adaptive automatic or customized curve, wave radius, and scale.
-- **Drag-and-drop assist**: Hover a taskbar app while dragging to bring its window forward.
-- **Tray item control**: Granular visibility settings for system tray elements.
+Lightency consists of two parts:
 
-### Start Button & Start Menu
-Customize the Start button appearance with a smooth hue color picker, custom sizing (50%–180%), and position adjustments. Control Start menu layout by hiding search, pinned apps, recommended items, user profile, or power buttons.
+- `lightency.exe`: Win32 controller, settings GUI, system tray icon, and updater.
+- `lightency_hook.dll`: injected module running inside `explorer.exe` and `StartMenuExperienceHost.exe`.
 
-<p align="center">
-  <img src="assets/screenshots/start-button.png" width="360" alt="Start Button & Color Picker">
-  &nbsp;&nbsp;
-  <img src="assets/screenshots/start-menu.png" width="360" alt="Start Menu customization">
-</p>
+### How it works
 
-- **Start Button customization**: Custom icon color with smooth hue slider, accent color sync, custom scaling (50%–180%), and position adjustments.
-- **Start Menu control**: Granular visibility toggles for Search box, Pinned apps, Recommended, User profile, Power button, View selector, and Folders, plus simple/advanced sizing.
-- **Window animations & borders (beta)**: Fluid window minimize animation effect and window border removal.
-- **Lightweight & Portable**: Native executable and taskbar extension, no Electron/browser runtime or installer.
-- **Built-in updater**: Fast in-app update check and release installer.
+1. **Injection**: `lightency.exe` sets thread hooks (`SetWindowsHookExW` with `WH_CALLWNDPROC` and `WH_GETMESSAGE`) on the taskbar and start menu threads. Windows loads `lightency_hook.dll` into target processes upon message dispatch. No `CreateRemoteThread` or `WriteProcessMemory` is used.
+2. **XAML access**: `lightency_hook.dll` hooks into the visual tree using the native `InitializeXamlDiagnosticsEx` API. It reads and modifies WinRT XAML elements in-process without downloading symbol files (PDBs).
+3. **IPC**: Settings are synced between `lightency.exe` and `lightency_hook.dll` in real time via shared memory (`CreateFileMappingW` / `MapViewOfFile`).
+4. **Network**: The core tool and DLL never access the network. Network requests are only made when checking for updates via the GitHub Releases API.
+5. **Exit**: On close, event handlers (`PointerMoved`, `CompositionTarget::Rendering`) are detached, element transforms are restored to stock layout, and the DLL unhooks.
 
-## Architecture & How It Works
+## Download & Usage
 
-Lightency consists of two coordinated native components:
+1. Get the latest release from [Releases](https://github.com/SashkoTadof/Lightency/releases).
+2. Extract the ZIP and run `lightency.exe`.
 
-- **`lightency.exe`** (Controller & UI):
-  A standalone Win32 application that provides the settings GUI, manages the system tray icon, polls for GitHub releases, and monitors shell host processes.
-- **`lightency_hook.dll`** (Shell Extension):
-  A native C++20 library loaded into `explorer.exe` and `StartMenuExperienceHost.exe`.
+Settings can be opened from the system tray icon.
 
-### Execution Flow
+## Requirements & Notes
 
-1. **Standard Shell Hooks**:
-   `lightency.exe` installs standard Windows thread hooks (`SetWindowsHookExW` with `WH_CALLWNDPROC` and `WH_GETMESSAGE`) targeting the shell tray and start menu threads. When messages are dispatched, the operating system naturally loads `lightency_hook.dll` into the process space. No `CreateRemoteThread`, `WriteProcessMemory`, or binary symbol patching is used.
-2. **WinRT XAML Diagnostics**:
-   Rather than downloading Microsoft debugging symbols (PDBs) or hardcoding function offsets that break on monthly Windows updates, `lightency_hook.dll` connects to the taskbar visual tree through the official Windows `InitializeXamlDiagnosticsEx` API. Visual elements are queried directly in-process.
-3. **Inter-Process Configuration (IPC)**:
-   Configuration parameters and toggle states are synchronized in real time between the controller and the hook using shared memory (`CreateFileMappingW` / `MapViewOfFile`), eliminating disk I/O and pipe latency.
-4. **Network Access**:
-   The hook and core engine run completely offline and never initiate network traffic. The only component with network access is the optional, user-triggered updater inside `lightency.exe`, which queries the public GitHub Releases API.
-5. **Teardown & Cleanup**:
-   On application exit, window messages instruct the hook to detach XAML event handlers (`PointerMoved`, `LayoutUpdated`, `CompositionTarget::Rendering`), reset element transforms back to stock taskbar geometry, and gracefully unload.
+- **OS**: Windows 11 64-bit.
+- **Permissions**: Runs as a standard user. Administrator privileges may be needed if you interact with elevated windows or if your system restricts UI thread hooks.
+- **Antivirus notice**: Unsigned DLLs injected into Explorer via `SetWindowsHookExW` may trigger heuristic false positives in some security software.
 
-## Installation
+## Build
 
-1. Download `Lightency-1.1.1-win-x64.zip` from [Releases](https://github.com/SashkoTadof/Lightency/releases).
-2. Extract the archive into any folder.
-3. Launch `lightency.exe`.
-
-*(Optional)* Enable **Launch at startup** in Settings for seamless launch on boot.
-
-## Compatibility & Requirements
-
-- **OS**: Windows 11 (x64)
-- **Privileges**: Standard user privileges for typical desktop sessions. Running as Administrator may be required if managing windows of elevated applications or if specific Windows security policies restrict thread message hooks.
-- **Displays**: Full Per-Monitor DPI scaling support (V2).
-
-> **Note:** Unsigned shell extensions may occasionally trigger generic antivirus heuristics because code is executed in the `explorer.exe` process space via standard window hooks. Lightency uses standard Windows APIs (`SetWindowsHookExW`) and does not employ process injection routines.
-
-## Building from source
-
-Requirements: Visual Studio 2022 / Build Tools (C++20), Windows SDK (10.0.22621+), CMake 3.20+.
+Requires Visual Studio 2022 (C++20), Windows SDK 10.0.22621+, and CMake 3.20+.
 
 ```cmd
 build.bat
 ```
 
-The output portable distribution and ZIP archive will be created in `build\`.
+Output files will be generated in `build\`.
 
 ## License
 
-Released under the [MIT License](LICENSE).
+[MIT](LICENSE)
