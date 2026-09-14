@@ -186,57 +186,6 @@ namespace {
         CloseHandle(thread);
         return alive;
     }
-
-    HMODULE FindRemoteModule(DWORD pid, const wchar_t* moduleName) {
-        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
-        if (snap == INVALID_HANDLE_VALUE) return nullptr;
-        MODULEENTRY32W me{ sizeof(me) }; HMODULE result = nullptr;
-        for (BOOL ok = Module32FirstW(snap, &me); ok; ok = Module32NextW(snap, &me)) {
-            if (_wcsicmp(me.szModule, moduleName) == 0) { result = me.hModule; break; }
-        }
-        CloseHandle(snap);
-        return result;
-    }
-
-    bool InjectAndInitializeStartHost(DWORD pid, HMODULE localModule) {
-        if (!pid || !localModule) return false;
-        std::wstring dllPath = PayloadManager::GetHookDllPath();
-        HMODULE remoteModule = FindRemoteModule(pid, L"lightency_hook.dll");
-        HANDLE process = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
-            PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, FALSE, pid);
-        if (!process) { LogDebug("Start remote OpenProcess failed pid=" + std::to_string(pid) + " err=" + std::to_string(GetLastError())); return false; }
-        if (!remoteModule) {
-            const SIZE_T bytes = (dllPath.size() + 1) * sizeof(wchar_t);
-            void* remotePath = VirtualAllocEx(process, nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-            if (remotePath && WriteProcessMemory(process, remotePath, dllPath.c_str(), bytes, nullptr)) {
-                auto loadLibrary = reinterpret_cast<LPTHREAD_START_ROUTINE>(
-                    GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));
-                HANDLE thread = CreateRemoteThread(process, nullptr, 0, loadLibrary, remotePath, 0, nullptr);
-                if (thread) {
-                    WaitForSingleObject(thread, 1500); DWORD result = 0; GetExitCodeThread(thread, &result);
-                    LogDebug("Start remote LoadLibrary result=" + std::to_string(result) + " pid=" + std::to_string(pid));
-                    CloseHandle(thread);
-                }
-                else LogDebug("Start remote LoadLibrary thread failed err=" + std::to_string(GetLastError()));
-            }
-            if (remotePath) VirtualFreeEx(process, remotePath, 0, MEM_RELEASE);
-            remoteModule = FindRemoteModule(pid, L"lightency_hook.dll");
-            if (!remoteModule) LogDebug("Start remote module missing pid=" + std::to_string(pid) + " err=" + std::to_string(GetLastError()));
-        }
-        bool initialized = false;
-        if (remoteModule) {
-            auto localProc = reinterpret_cast<const BYTE*>(GetProcAddress(localModule, "LightencyInitializeStartMenu"));
-            auto localBase = reinterpret_cast<const BYTE*>(localModule);
-            if (localProc) {
-                auto remoteProc = reinterpret_cast<LPTHREAD_START_ROUTINE>(
-                    reinterpret_cast<BYTE*>(remoteModule) + (localProc - localBase));
-                HANDLE thread = CreateRemoteThread(process, nullptr, 0, remoteProc, nullptr, 0, nullptr);
-                if (thread) { WaitForSingleObject(thread, 1500); CloseHandle(thread); initialized = true; }
-            }
-        }
-        CloseHandle(process);
-        return initialized;
-    }
 }
 
 HANDLE Injector::s_hMapFile = nullptr;
