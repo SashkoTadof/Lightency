@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
-project(lightency VERSION 1.0.1 LANGUAGES C CXX)
+project(lightency VERSION 1.1.0 LANGUAGES C CXX)
+option(LIGHTENCY_DIAGNOSTICS "Enable runtime diagnostic logs" OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,6 +18,12 @@ add_library(lightency_hook SHARED
     src/hook/lightency_hook.rc
     src/hook/dllmain.cpp
     src/hook/xaml_bridge.cpp
+    src/hook/drag_drop_assist.cpp
+    src/hook/drag_drop_assist.h
+    src/hook/start_menu_size.cpp
+    src/hook/start_menu_size.h
+    src/hook/start_button_style.cpp
+    src/hook/start_button_style.h
     src/hook/dock_animation.cpp
     src/hook/dock_animation.h
     src/common/composition.cpp
@@ -27,6 +34,9 @@ add_library(lightency_hook SHARED
 target_include_directories(lightency_hook PRIVATE
     src/hook
 )
+if (LIGHTENCY_DIAGNOSTICS)
+    target_compile_definitions(lightency_hook PRIVATE LIGHTENCY_DIAGNOSTICS)
+endif()
 
 target_link_libraries(lightency_hook PRIVATE
     user32
@@ -38,6 +48,7 @@ target_link_libraries(lightency_hook PRIVATE
     runtimeobject
     shlwapi
     windowsapp
+    uiautomationcore
     advapi32
     msimg32
     dcomp
@@ -64,6 +75,12 @@ add_executable(lightency WIN32
     src/app/payload_manager.h
     src/app/update_manager.cpp
     src/app/update_manager.h
+    src/app/window_animation.cpp
+    src/app/window_animation.h
+    src/app/border_manager.cpp
+    src/app/border_manager.h
+    src/app/branded_dialog.cpp
+    src/app/branded_dialog.h
     src/common/composition.cpp
     src/common/composition.h
     src/common/types.h
@@ -80,6 +97,9 @@ target_link_libraries(lightency PRIVATE
     comctl32
     shcore
     ole32
+    oleaut32
+    uiautomationcore
+    d2d1
     psapi
     advapi32
     msimg32
@@ -87,3 +107,6 @@ target_link_libraries(lightency PRIVATE
     ntdll
     winhttp
 )
+if (LIGHTENCY_DIAGNOSTICS)
+    target_compile_definitions(lightency PRIVATE LIGHTENCY_DIAGNOSTICS)
+endif()

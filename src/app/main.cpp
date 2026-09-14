@@ -7,7 +7,10 @@
 #include "update_manager.h"
 #include "../common/types.h"
 #include "../common/composition.h"
+#include "window_animation.h"
+#include "border_manager.h"
 #include <string>
+#include <shellapi.h>
 
 #define WINDOW_CLASS_NAME L"LightencyMainWindow"
 #define IDT_TASKBAR_RETRY_1 6001
@@ -15,6 +18,7 @@
 #define IDT_TASKBAR_RETRY_3 6003
 #define WM_LIGHTENCY_APPLY_SETTINGS (WM_USER + 201)
 #define WM_LIGHTENCY_OPEN_UI        (WM_USER + 202)
+#define WM_LIGHTENCY_CHECK_UPDATES  (WM_USER + 203)
 
 using namespace Lightency;
 
@@ -27,6 +31,8 @@ static bool g_bQuitting = false;
 
 static void CleanShutdownAndRestoreSystem() {
     LogDebug("CleanShutdownAndRestoreSystem: start");
+    BorderManager::Shutdown();
+    WindowAnimation::Shutdown();
     ApplyNormalToAllTaskbars();
     Injector::Shutdown();
     LogDebug("CleanShutdownAndRestoreSystem: finish");
@@ -35,6 +41,8 @@ static void CleanShutdownAndRestoreSystem() {
 static void ApplyAllSettings() {
     LogDebug("ApplyAllSettings: start");
     Injector::Update(g_Config);
+    WindowAnimation::Update(g_Config);
+    BorderManager::Update(g_Config);
     LogDebug("ApplyAllSettings: after Injector::Update");
 
     if (g_Config.clearTaskbar) {
@@ -82,6 +90,11 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
         ModernGUI::Show(GetModuleHandleW(nullptr), g_Config, OnConfigChangedCallback);
         return 0;
     }
+    if (uMsg == WM_LIGHTENCY_CHECK_UPDATES) {
+        LogDebug("MainWndProc: WM_LIGHTENCY_CHECK_UPDATES received");
+        UpdateManager::CheckNow(hWnd);
+        return 0;
+    }
 
     switch (uMsg) {
     case WM_CREATE: {
@@ -114,9 +127,10 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
         return 0;
     }
     case WM_TRAYICON: {
-        if (lParam == WM_LBUTTONDBLCLK || lParam == WM_LBUTTONUP) {
+        UINT msg = LOWORD(lParam);
+        if (msg == WM_LBUTTONDBLCLK || msg == WM_LBUTTONUP || msg == NIN_SELECT) {
             ModernGUI::Show(GetModuleHandleW(nullptr), g_Config, OnConfigChangedCallback);
-        } else if (lParam == WM_RBUTTONUP) {
+        } else if (msg == WM_RBUTTONUP || msg == WM_CONTEXTMENU) {
             TrayManager::ShowContextMenu(hWnd, g_Config);
         }
         return 0;
@@ -158,18 +172,49 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
     return DefWindowProcW(hWnd, uMsg, wParam, lParam);
 }
 
+static void EnableDarkMode() {
+    HMODULE hUxtheme = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!hUxtheme) return;
+
+    enum PreferredAppMode {
+        Default = 0,
+        AllowDark = 1,
+        ForceDark = 2,
+        ForceLight = 3,
+        Max = 4
+    };
+    using fnSetPreferredAppMode = PreferredAppMode(WINAPI*)(PreferredAppMode);
+    using fnFlushMenuThemes = void(WINAPI*)();
+
+    auto setPreferredAppMode = reinterpret_cast<fnSetPreferredAppMode>(GetProcAddress(hUxtheme, MAKEINTRESOURCEA(135)));
+    if (setPreferredAppMode) {
+        setPreferredAppMode(ForceDark);
+    }
+
+    auto flushMenuThemes = reinterpret_cast<fnFlushMenuThemes>(GetProcAddress(hUxtheme, MAKEINTRESOURCEA(136)));
+    if (flushMenuThemes) {
+        flushMenuThemes();
+    }
+}
+
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
     LogDebug("wWinMain: start");
     DisableProcessWindowsGhosting();
+    EnableDarkMode();
 
     bool bQuit = (pCmdLine && (wcsstr(pCmdLine, L"--quit") || wcsstr(pCmdLine, L"-q")));
     bool bDaemon = (pCmdLine && (wcsstr(pCmdLine, L"--daemon") || wcsstr(pCmdLine, L"-d")));
+    bool bCheckUpdates = (pCmdLine && (wcsstr(pCmdLine, L"--check-updates") || wcsstr(pCmdLine, L"-u")));
 
     HWND hExisting = FindWindowW(WINDOW_CLASS_NAME, nullptr);
     if (hExisting) {
         if (bQuit) {
             LogDebug("wWinMain: existing instance found, sending IDM_EXIT");
             PostMessageW(hExisting, WM_COMMAND, IDM_EXIT, 0);
+            return 0;
+        }
+        if (bCheckUpdates) {
+            PostMessageW(hExisting, WM_LIGHTENCY_CHECK_UPDATES, 0, 0);
             return 0;
         }
         LogDebug("wWinMain: existing instance found, posting WM_LIGHTENCY_OPEN_UI");
@@ -194,14 +239,35 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
 
     g_hMainWnd = CreateWindowExW(
         0, WINDOW_CLASS_NAME, L"LightencyCore",
-        0, 0, 0, 0, 0,
-        HWND_MESSAGE, nullptr, hInstance, nullptr
+        WS_POPUP, 0, 0, 0, 0,
+        nullptr, nullptr, hInstance, nullptr
     );
+    if (g_hMainWnd) {
+        HMODULE hUxtheme = GetModuleHandleW(L"uxtheme.dll");
+        if (hUxtheme) {
+            using fnAllowDarkModeForWindow = bool(WINAPI*)(HWND, bool);
+            auto allowDarkModeForWindow = reinterpret_cast<fnAllowDarkModeForWindow>(GetProcAddress(hUxtheme, MAKEINTRESOURCEA(133)));
+            if (allowDarkModeForWindow) {
+                allowDarkModeForWindow(g_hMainWnd, true);
+            }
+            using fnSetWindowTheme = HRESULT(WINAPI*)(HWND, LPCWSTR, LPCWSTR);
+            auto setWindowTheme = reinterpret_cast<fnSetWindowTheme>(GetProcAddress(hUxtheme, "SetWindowTheme"));
+            if (setWindowTheme) {
+                setWindowTheme(g_hMainWnd, L"DarkMode_Explorer", nullptr);
+            }
+        }
+    }
     LogDebug("wWinMain: g_hMainWnd=" + std::to_string((unsigned long long)g_hMainWnd));
 
     ApplyAllSettings();
 
-    if (!bDaemon) {
+    if (bCheckUpdates) {
+        UpdateManager::CheckNow(g_hMainWnd);
+    } else if (g_Config.automaticUpdates) {
+        UpdateManager::Start(g_hMainWnd);
+    }
+
+    if (!bDaemon && !bCheckUpdates) {
         LogDebug("wWinMain: showing GUI");
         ModernGUI::Show(hInstance, g_Config, OnConfigChangedCallback);
     }

@@ -28,6 +28,8 @@ HICON IconGenerator::CreateMinimalistIcon(int size) {
     bi.bV5AlphaMask = 0xFF000000;
 
     HDC hdcScreen = GetDC(nullptr);
+    if (!hdcScreen) return nullptr;
+
     uint32_t* pPixels = nullptr;
     HBITMAP rawColorBitmap = CreateDIBSection(
         hdcScreen, reinterpret_cast<BITMAPINFO*>(&bi),
@@ -38,7 +40,7 @@ HICON IconGenerator::CreateMinimalistIcon(int size) {
 
     if (!hColorBitmap || !pPixels) return nullptr;
 
-    std::fill_n(pPixels, size * size, 0);
+    std::fill_n(pPixels, static_cast<size_t>(size) * size, 0);
 
     const float cx = (size - 1) / 2.0f;
     const float cy = (size - 1) / 2.0f;
@@ -64,10 +66,10 @@ HICON IconGenerator::CreateMinimalistIcon(int size) {
                     float nx = (px - cx) * inv_scale;
                     float ny = (py - cy) * inv_scale;
 
-                    float ax = std::abs(nx);
-                    float ay = std::abs(ny);
+                    float ax = std::fabs(nx);
+                    float ay = std::fabs(ny);
 
-                    float dist_star = (ax > 0.0f || ay > 0.0f) ? std::pow(std::pow(ax, p) + std::pow(ay, p), inv_p) : 0.0f;
+                    float dist_star = (ax > 0.0f || ay > 0.0f) ? std::powf(std::powf(ax, p) + std::powf(ay, p), inv_p) : 0.0f;
 
                     float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
 

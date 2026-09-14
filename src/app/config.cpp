@@ -1,5 +1,6 @@
 #include "config.h"
 #include <shlobj.h>
+#include <algorithm>
 
 namespace Lightency {
 
@@ -62,9 +63,42 @@ AppConfig ConfigManager::Load() {
     cfg.hideTrayBattery = ReadBool(L"Settings", L"HideTrayBattery", false);
     cfg.hideTrayClock = ReadBool(L"Settings", L"HideTrayClock", false);
     cfg.layoutEditor = ReadBool(L"Settings", L"LayoutEditor", true);
+    cfg.dragDropAssist = ReadBool(L"Settings", L"DragDropAssist", true);
+    cfg.startMenuSizing = ReadBool(L"StartMenu", L"Enabled", false);
+    cfg.startMenuAdvanced = ReadBool(L"StartMenu", L"Advanced", false);
+    cfg.startMenuScale = std::clamp(static_cast<int>(GetPrivateProfileIntW(L"StartMenu", L"Scale", 100, path.c_str())), 75, 150);
+    cfg.startMenuWidth = std::clamp(static_cast<int>(GetPrivateProfileIntW(L"StartMenu", L"Width", 640, path.c_str())), 320, 1400);
+    cfg.startMenuHeight = std::clamp(static_cast<int>(GetPrivateProfileIntW(L"StartMenu", L"Height", 720, path.c_str())), 400, 1200);
+    cfg.searchWidth = std::clamp(static_cast<int>(GetPrivateProfileIntW(L"StartMenu", L"SearchWidth", 640, path.c_str())), 320, 1400);
+    cfg.searchHeight = std::clamp(static_cast<int>(GetPrivateProfileIntW(L"StartMenu", L"SearchHeight", 720, path.c_str())), 400, 1200);
+    cfg.startHideSearch = ReadBool(L"StartMenu", L"HideSearch", false);
+    cfg.startHidePinned = ReadBool(L"StartMenu", L"HidePinned", false);
+    cfg.startHideRecommended = ReadBool(L"StartMenu", L"HideRecommended", false);
+    cfg.startHideProfile = ReadBool(L"StartMenu", L"HideProfile", false);
+    cfg.startHidePower = ReadBool(L"StartMenu", L"HidePower", false);
+    cfg.startHideViewSelector = ReadBool(L"StartMenu", L"HideViewSelector", false);
+    cfg.startHideFolders = ReadBool(L"StartMenu", L"HideFolders", false);
+    if (!cfg.startMenuAdvanced) {
+        cfg.startMenuWidth = 960 * cfg.startMenuScale / 100;
+        cfg.startMenuHeight = 720 * cfg.startMenuScale / 100;
+        cfg.searchWidth = cfg.startMenuWidth;
+        cfg.searchHeight = cfg.startMenuHeight;
+    }
+    cfg.startIconCustom = ReadBool(L"StartButton", L"CustomIcon", false);
+    cfg.startIconSize = std::clamp(static_cast<int>(GetPrivateProfileIntW(L"StartButton", L"IconSize", 100, path.c_str())), 40, 250);
+    cfg.startIconAccentColor = ReadBool(L"StartButton", L"AccentColor", false);
+    cfg.startIconColorHue = static_cast<int>(GetPrivateProfileIntW(L"StartButton", L"ColorHue", static_cast<UINT>(-1), path.c_str()));
     cfg.showTrayIcon = ReadBool(L"Settings", L"ShowTrayIcon", true);
     cfg.autostart = IsAutostartEnabled();
     cfg.automaticUpdates = ReadBool(L"Settings", L"AutomaticUpdates", true);
+    cfg.windowGenieAnimation = ReadBool(L"Window", L"GenieAnimation", false);
+    cfg.hideWindowBorders = ReadBool(L"Window", L"HideBorders", false);
+    cfg.windowAnimationDuration = GetPrivateProfileIntW(L"Window", L"AnimationDuration", 420, path.c_str());
+    cfg.windowCurveIntensity = std::clamp(static_cast<int>(GetPrivateProfileIntW(L"Window", L"CurveIntensity", 100, path.c_str())), 50, 125);
+    cfg.windowTargetWidth = std::clamp(static_cast<int>(GetPrivateProfileIntW(L"Window", L"TargetWidth", 22, path.c_str())), 12, 64);
+    cfg.windowRepeatGuard = std::clamp(static_cast<int>(GetPrivateProfileIntW(L"Window", L"RepeatGuard", 80, path.c_str())), 0, 500);
+    cfg.windowCaptureDelay = std::clamp(static_cast<int>(GetPrivateProfileIntW(L"Window", L"CaptureDelay", 180, path.c_str())), 50, 500);
+    if (cfg.windowAnimationDuration < 150 || cfg.windowAnimationDuration > 1000) cfg.windowAnimationDuration = 420;
 
     return cfg;
 }
@@ -95,8 +129,35 @@ void ConfigManager::Save(const AppConfig& cfg) {
     WriteBool(L"Settings", L"HideTrayBattery", cfg.hideTrayBattery);
     WriteBool(L"Settings", L"HideTrayClock", cfg.hideTrayClock);
     WriteBool(L"Settings", L"LayoutEditor", cfg.layoutEditor);
+    WriteBool(L"Settings", L"DragDropAssist", cfg.dragDropAssist);
+    WriteBool(L"StartMenu", L"Enabled", cfg.startMenuSizing);
+    WriteBool(L"StartMenu", L"Advanced", cfg.startMenuAdvanced);
+    WriteInt(L"StartMenu", L"Scale", cfg.startMenuScale);
+    WriteInt(L"StartMenu", L"Width", cfg.startMenuWidth);
+    WriteInt(L"StartMenu", L"Height", cfg.startMenuHeight);
+    WriteInt(L"StartMenu", L"SearchWidth", cfg.searchWidth);
+    WriteInt(L"StartMenu", L"SearchHeight", cfg.searchHeight);
+    WriteBool(L"StartMenu", L"HideSearch", cfg.startHideSearch);
+    WriteBool(L"StartMenu", L"HidePinned", cfg.startHidePinned);
+    WriteBool(L"StartMenu", L"HideRecommended", cfg.startHideRecommended);
+    WriteBool(L"StartMenu", L"HideProfile", cfg.startHideProfile);
+    WriteBool(L"StartMenu", L"HidePower", cfg.startHidePower);
+    WriteBool(L"StartMenu", L"HideViewSelector", cfg.startHideViewSelector);
+    WriteBool(L"StartMenu", L"HideFolders", cfg.startHideFolders);
+    WriteBool(L"StartButton", L"CustomIcon", cfg.startIconCustom);
+    WriteInt(L"StartButton", L"IconSize", cfg.startIconSize);
+    WriteBool(L"StartButton", L"AccentColor", cfg.startIconAccentColor);
+    WriteInt(L"StartButton", L"ColorHue", cfg.startIconColorHue);
     WriteBool(L"Settings", L"ShowTrayIcon", cfg.showTrayIcon);
     WriteBool(L"Settings", L"AutomaticUpdates", cfg.automaticUpdates);
+    WriteBool(L"Window", L"GenieAnimation", cfg.windowGenieAnimation);
+    WriteBool(L"Window", L"HideBorders", cfg.hideWindowBorders);
+    WriteInt(L"Window", L"AnimationDuration", cfg.windowAnimationDuration);
+    WriteInt(L"Window", L"CurveIntensity", cfg.windowCurveIntensity);
+    WriteInt(L"Window", L"TargetWidth", cfg.windowTargetWidth);
+    WritePrivateProfileStringW(L"Window", L"FrameRate", nullptr, path.c_str());
+    WriteInt(L"Window", L"RepeatGuard", cfg.windowRepeatGuard);
+    WriteInt(L"Window", L"CaptureDelay", cfg.windowCaptureDelay);
     SetAutostart(cfg.autostart);
 }
 

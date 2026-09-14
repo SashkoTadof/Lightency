@@ -4,8 +4,8 @@
 #include <string>
 
 #define WM_LIGHTENCY_APPLY (WM_APP + 0x4242)
-#define LIGHTENCY_VERSION L"v1.0.1"
-#define LIGHTENCY_VERSION_STR "1.0.1"
+#define LIGHTENCY_VERSION L"v1.1.0"
+#define LIGHTENCY_VERSION_STR "1.1.0"
 
 enum class TaskbarEffect : int {
     Normal = 0,
@@ -34,6 +34,8 @@ using pfnSetWindowCompositionAttribute = BOOL(WINAPI*)(HWND, WINCOMPATTRDATA*);
 
 namespace Lightency {
 
+inline constexpr const wchar_t* SHARED_HOOK_CONFIG_MAPPING_NAME = L"Lightency_Shared_Config_v9";
+
 struct SharedHookConfig {
     bool dockAnimation;
     int maxScale;
@@ -52,8 +54,25 @@ struct SharedHookConfig {
     bool hideTrayBattery;
     bool hideTrayClock;
     bool layoutEditor;
+    bool dragDropAssist;
     bool clearTaskbar;
     bool hideTaskbarBorder;
+    bool startMenuSizing;
+    int startMenuWidth;
+    int startMenuHeight;
+    int searchWidth;
+    int searchHeight;
+    bool startHideSearch;
+    bool startHidePinned;
+    bool startHideRecommended;
+    bool startHideProfile;
+    bool startHidePower;
+    bool startHideViewSelector;
+    bool startHideFolders;
+    bool startIconCustom;
+    int startIconSize;
+    bool startIconAccentColor;
+    int startIconColorHue;
     DWORD masterPid;
 };
 
@@ -80,9 +99,46 @@ struct AppConfig {
     bool hideTrayBattery = false;
     bool hideTrayClock = false;
     bool layoutEditor = true;
+    bool dragDropAssist = true;
+    bool startMenuSizing = false;
+    bool startMenuAdvanced = false;
+    int startMenuScale = 100;
+    int startMenuWidth = 640;
+    int startMenuHeight = 720;
+    int searchWidth = 640;
+    int searchHeight = 720;
+    bool startHideSearch = false;
+    bool startHidePinned = false;
+    bool startHideRecommended = false;
+    bool startHideProfile = false;
+    bool startHidePower = false;
+    bool startHideViewSelector = false;
+    bool startHideFolders = false;
+    bool startIconCustom = false;
+    int startIconSize = 100;
+    bool startIconAccentColor = false;
+    int startIconColorHue = -1;
     bool showTrayIcon = true;
     bool autostart = false;
     bool automaticUpdates = true;
+    bool windowGenieAnimation = false;
+    bool hideWindowBorders = false;
+    int windowAnimationDuration = 420;
+    int windowCurveIntensity = 100;
+    int windowTargetWidth = 22;
+    int windowRepeatGuard = 80;
+    int windowCaptureDelay = 180;
 };
+
+struct WindowAnimationIpc {
+    DWORD masterPid;
+    HWND receiverWindow;
+    BOOL enabled;
+};
+
+inline UINT GetWindowAnimationEarlyMsg() {
+    static UINT msg = RegisterWindowMessageW(L"Lightency_WindowAnimation_Early_v1");
+    return msg;
+}
 
 }

@@ -1,5 +1,7 @@
 #include "dock_animation.h"
 #include "xaml_bridge.h"
+#include "start_button_style.h"
+#include "drag_drop_assist.h"
 #include <unknwn.h>
 #include <objbase.h>
 #include <windows.h>
@@ -40,7 +42,7 @@ static bool IsProcessAlive(DWORD pid) {
 static void EnsureLiveConfigMapped() {
     if (!s_pLiveSharedConfig) {
         if (!s_hConfigMap) {
-            s_hConfigMap = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Lightency_Shared_Config_v7");
+            s_hConfigMap = OpenFileMappingW(FILE_MAP_READ, FALSE, Lightency::SHARED_HOOK_CONFIG_MAPPING_NAME);
         }
         if (s_hConfigMap) {
             s_pLiveSharedConfig = (Lightency::SharedHookConfig*)MapViewOfFile(s_hConfigMap, FILE_MAP_READ, 0, 0, sizeof(Lightency::SharedHookConfig));
@@ -69,9 +71,9 @@ static void EnsureLiveConfigMapped() {
             s_pLiveSharedConfig->hideTrayClock != g_lightencyDockConfig.hideTrayClock ||
             s_pLiveSharedConfig->clearTaskbar != g_lightencyDockConfig.clearTaskbar ||
             s_pLiveSharedConfig->hideTaskbarBorder != g_lightencyDockConfig.hideTaskbarBorder ||
+            s_pLiveSharedConfig->dragDropAssist != g_lightencyDockConfig.dragDropAssist ||
             newLayoutEditor != g_lightencyDockConfig.layoutEditor ||
             newDockAnim != g_lightencyDockConfig.dockAnimation) {
-            bool animToggledOff = (g_lightencyDockConfig.dockAnimation && !newDockAnim);
             bool layoutToggledOff = (g_lightencyDockConfig.layoutEditor && !newLayoutEditor);
             g_lightencyDockConfig = *s_pLiveSharedConfig;
             g_lightencyDockConfig.dockAnimation = newDockAnim;
@@ -80,13 +82,10 @@ static void EnsureLiveConfigMapped() {
                    g_lightencyDockConfig.maxScale, g_lightencyDockConfig.effectRadius, g_lightencyDockConfig.dockAnimation);
             LoadSettings();
 
-
             if (layoutToggledOff) {
                 RestoreDefaultLayout();
             }
-            if (animToggledOff || !newDockAnim) {
-                Wh_ModSettingsChanged();
-            }
+            Wh_ModSettingsChanged();
         }
     }
 }
@@ -116,6 +115,7 @@ static void EnsureLiveConfigMapped() {
 #include <cmath>
 
 #include <map>
+#include <set>
 
 #include <algorithm>
 
@@ -140,15 +140,21 @@ using namespace winrt::Windows::UI::Xaml::Automation;
 
 struct TrayVisibilityState {
     winrt::weak_ref<FrameworkElement> element;
-    Visibility originalVisibility = Visibility::Visible;
+    bool currentlyHiddenByUs = false;
 };
 
 static std::unordered_map<void*, TrayVisibilityState> g_trayVisibilityStates;
 
 struct TaskbarAppearanceState {
-    winrt::weak_ref<winrt::Windows::UI::Xaml::Shapes::Shape> element;
+    winrt::weak_ref<FrameworkElement> element;
     Brush originalFill{nullptr};
-    bool border = false;
+    Brush originalStroke{nullptr};
+    double originalStrokeThickness = 0.0;
+    double originalOpacity = 1.0;
+    Visibility originalVisibility = Visibility::Visible;
+    Thickness originalBorderThickness{0, 0, 0, 0};
+    Brush originalBorderBrush{nullptr};
+    bool isBorder = false;
 };
 
 static std::unordered_map<void*, TaskbarAppearanceState> g_taskbarAppearanceStates;
@@ -159,22 +165,60 @@ static bool ContainsAny(const std::wstring& value,
 
 static void RestoreTaskbarAppearance() {
     for (auto& [key, state] : g_taskbarAppearanceStates) {
-        if (auto shape = state.element.get()) {
+        if (auto el = state.element.get()) {
             try {
-                shape.Fill(state.originalFill);
+                if (auto shape = el.try_as<winrt::Windows::UI::Xaml::Shapes::Shape>()) {
+                    shape.Fill(state.originalFill);
+                    shape.Stroke(state.originalStroke);
+                    shape.StrokeThickness(state.originalStrokeThickness);
+                }
+                if (auto b = el.try_as<winrt::Windows::UI::Xaml::Controls::Border>()) {
+                    b.BorderThickness(state.originalBorderThickness);
+                    b.BorderBrush(state.originalBorderBrush);
+                }
+                el.Opacity(state.originalOpacity);
+                el.Visibility(state.originalVisibility);
             } catch (...) {}
         }
     }
     g_taskbarAppearanceStates.clear();
 }
 
+static void RemoveTaskbarHwndBorder() {
+    typedef HRESULT (WINAPI *DwmSetWindowAttribute_t)(HWND, DWORD, LPCVOID, DWORD);
+    static auto pfnDwmSetWindowAttribute = (DwmSetWindowAttribute_t)GetProcAddress(
+        GetModuleHandleW(L"dwmapi.dll"), "DwmSetWindowAttribute");
+    if (!pfnDwmSetWindowAttribute) {
+        HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
+        if (hDwm) pfnDwmSetWindowAttribute = (DwmSetWindowAttribute_t)GetProcAddress(hDwm, "DwmSetWindowAttribute");
+    }
+    if (!pfnDwmSetWindowAttribute) return;
+
+    auto clearBorder = [](HWND hWnd, DwmSetWindowAttribute_t pfn) {
+        if (!hWnd) return;
+        COLORREF none = 0xFFFFFFFE;
+        pfn(hWnd, 34, &none, sizeof(none));
+    };
+
+    clearBorder(FindWindowW(L"Shell_TrayWnd", nullptr), pfnDwmSetWindowAttribute);
+    HWND hSec = nullptr;
+    while ((hSec = FindWindowExW(nullptr, hSec, L"Shell_SecondaryTrayWnd", nullptr)) != nullptr) {
+        clearBorder(hSec, pfnDwmSetWindowAttribute);
+    }
+}
+
 static void ApplyTaskbarAppearance(FrameworkElement const& taskbarElement) {
     if (!taskbarElement) return;
     try {
+        RemoveTaskbarHwndBorder();
+
         FrameworkElement root = taskbarElement;
         while (auto parent = VisualTreeHelper::GetParent(root).try_as<FrameworkElement>()) {
             root = parent;
         }
+
+        const bool clearTaskbar = g_lightencyDockConfig.clearTaskbar;
+        const bool hideBorder = g_lightencyDockConfig.hideTaskbarBorder || clearTaskbar;
 
         std::vector<FrameworkElement> stack{root};
         while (!stack.empty()) {
@@ -182,19 +226,75 @@ static void ApplyTaskbarAppearance(FrameworkElement const& taskbarElement) {
             stack.pop_back();
 
             const std::wstring name = element.Name().c_str();
-            const bool background = name == L"BackgroundFill";
-            const bool border = name == L"BackgroundStroke";
-            if (background || border) {
+            const bool isFill = (name == L"BackgroundFill");
+            bool isStroke = (name == L"BackgroundStroke" || name == L"TaskbarStroke" ||
+                             name == L"TopBorder" || name == L"BackgroundBorder" ||
+                             (!name.empty() && name.find(L"Stroke") != std::wstring::npos));
+
+            if (!isStroke && !isFill) {
+                if (auto s = element.try_as<winrt::Windows::UI::Xaml::Shapes::Shape>()) {
+                    double h = s.Height();
+                    double ah = s.ActualHeight();
+                    if ((h > 0.0 && h <= 2.5) || (ah > 0.0 && ah <= 2.5)) {
+                        isStroke = true;
+                    }
+                }
+            }
+
+            if (isFill) {
                 if (auto shape = element.try_as<winrt::Windows::UI::Xaml::Shapes::Shape>()) {
                     void* key = winrt::get_abi(shape);
                     auto [it, inserted] = g_taskbarAppearanceStates.try_emplace(
-                        key, TaskbarAppearanceState{shape, shape.Fill(), border});
-                    const bool transparent = border
-                        ? g_lightencyDockConfig.hideTaskbarBorder
-                        : g_lightencyDockConfig.clearTaskbar;
-                    shape.Fill(transparent
-                        ? Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent())
-                        : it->second.originalFill);
+                        key, TaskbarAppearanceState{element, shape.Fill(), shape.Stroke(), shape.StrokeThickness(),
+                                                   element.Opacity(), element.Visibility(), {}, nullptr, false});
+                    if (clearTaskbar) {
+                        shape.Fill(Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
+                        shape.Stroke(Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
+                        shape.StrokeThickness(0.0);
+                    } else {
+                        shape.Fill(it->second.originalFill);
+                        shape.Stroke(it->second.originalStroke);
+                        shape.StrokeThickness(it->second.originalStrokeThickness);
+                    }
+                }
+            } else if (isStroke) {
+                void* key = winrt::get_abi(element);
+                auto shape = element.try_as<winrt::Windows::UI::Xaml::Shapes::Shape>();
+                auto borderCtrl = element.try_as<winrt::Windows::UI::Xaml::Controls::Border>();
+                Brush fill = shape ? shape.Fill() : nullptr;
+                Brush stroke = shape ? shape.Stroke() : nullptr;
+                double strokeThick = shape ? shape.StrokeThickness() : 0.0;
+                Thickness bThick = borderCtrl ? borderCtrl.BorderThickness() : Thickness{0,0,0,0};
+                Brush bBrush = borderCtrl ? borderCtrl.BorderBrush() : nullptr;
+
+                auto [it, inserted] = g_taskbarAppearanceStates.try_emplace(
+                    key, TaskbarAppearanceState{element, fill, stroke, strokeThick,
+                                               element.Opacity(), element.Visibility(), bThick, bBrush, true});
+
+                if (hideBorder) {
+                    element.Visibility(Visibility::Collapsed);
+                    element.Opacity(0.0);
+                    if (shape) {
+                        shape.Fill(Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
+                        shape.Stroke(Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
+                        shape.StrokeThickness(0.0);
+                    }
+                    if (borderCtrl) {
+                        borderCtrl.BorderThickness({0, 0, 0, 0});
+                        borderCtrl.BorderBrush(Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
+                    }
+                } else {
+                    element.Visibility(it->second.originalVisibility);
+                    element.Opacity(it->second.originalOpacity);
+                    if (shape) {
+                        shape.Fill(it->second.originalFill);
+                        shape.Stroke(it->second.originalStroke);
+                        shape.StrokeThickness(it->second.originalStrokeThickness);
+                    }
+                    if (borderCtrl) {
+                        borderCtrl.BorderThickness(it->second.originalBorderThickness);
+                        borderCtrl.BorderBrush(it->second.originalBorderBrush);
+                    }
                 }
             }
 
@@ -216,7 +316,11 @@ static void RestoreTrayVisibility() {
     for (auto& [key, state] : g_trayVisibilityStates) {
         if (auto element = state.element.get()) {
             try {
-                element.Visibility(state.originalVisibility);
+                if (state.currentlyHiddenByUs) {
+                    if (auto dep = element.try_as<DependencyObject>()) {
+                        dep.ClearValue(winrt::Windows::UI::Xaml::UIElement::VisibilityProperty());
+                    }
+                }
                 element.InvalidateMeasure();
                 element.InvalidateArrange();
                 if (auto parent = VisualTreeHelper::GetParent(element).try_as<FrameworkElement>()) {
@@ -551,7 +655,7 @@ static TrayItemKind IdentifyTrayIcon(FrameworkElement const& icon) {
         std::wstring className = TrayToLower(winrt::get_class_name(element).c_str());
         std::wstring name = TrayToLower(element.Name().c_str());
 
-        if (ContainsAny(className, {L"language"}) ||
+        if (ContainsAny(className, {L"language", L"inputindicator", L"systemtray.inputindicatorview"}) ||
             ContainsAny(name, {L"language", L"inputindicator"})) {
             return TrayItemKind::Language;
         }
@@ -562,6 +666,11 @@ static TrayItemKind IdentifyTrayIcon(FrameworkElement const& icon) {
         if (auto textBlock = element.try_as<Controls::TextBlock>()) {
             std::wstring text = textBlock.Text().c_str();
             if (!text.empty()) {
+                if (text.length() >= 2 && text.length() <= 4 &&
+                    std::all_of(text.begin(), text.end(), iswupper)) {
+                    return TrayItemKind::Language;
+                }
+
                 wchar_t glyph = text.front();
 
                 if (GlyphInRanges(glyph, {{0xE992, 0xE995}, {0xEA85, 0xEA85},
@@ -660,8 +769,21 @@ static void ApplyTrayItemVisibility(FrameworkElement const& taskbarElement) {
             if (recognized) {
                 void* key = winrt::get_abi(element);
                 auto [it, inserted] = g_trayVisibilityStates.try_emplace(
-                    key, TrayVisibilityState{ element, element.Visibility() });
-                element.Visibility(hide ? Visibility::Collapsed : it->second.originalVisibility);
+                    key, TrayVisibilityState{ element, false });
+                
+                if (hide) {
+                    if (!it->second.currentlyHiddenByUs || element.Visibility() != Visibility::Collapsed) {
+                        element.Visibility(Visibility::Collapsed);
+                        it->second.currentlyHiddenByUs = true;
+                    }
+                } else {
+                    if (it->second.currentlyHiddenByUs) {
+                        if (auto dep = element.try_as<DependencyObject>()) {
+                            dep.ClearValue(winrt::Windows::UI::Xaml::UIElement::VisibilityProperty());
+                        }
+                        it->second.currentlyHiddenByUs = false;
+                    }
+                }
             }
 
             int childCount = VisualTreeHelper::GetChildrenCount(element);
@@ -855,8 +977,10 @@ struct XamlPointerSubscription {
     winrt::weak_ref<FrameworkElement> element;
     Input::PointerEventHandler moved{nullptr};
     Input::PointerEventHandler exited{nullptr};
+    winrt::Windows::Foundation::EventHandler<winrt::Windows::Foundation::IInspectable> layoutUpdated{nullptr};
     winrt::event_token movedToken{};
     winrt::event_token exitedToken{};
+    winrt::event_token layoutUpdatedToken{};
 };
 static std::map<void*, XamlPointerSubscription> g_xamlSubscriptions;
 
@@ -1793,6 +1917,67 @@ static ButtonKind ClassifyButton(FrameworkElement const& e) {
 }
 
 
+static void UpdateDragDropTargets(void* key, FrameworkElement const& taskbarFrame, HWND hWnd) {
+    if (!g_lightencyDockConfig.dragDropAssist || !taskbarFrame) return;
+    HWND targetHwnd = hWnd ? hWnd : FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (!targetHwnd || !IsWindow(targetHwnd)) return;
+
+    RECT taskbarRect{};
+    if (!GetWindowRect(targetHwnd, &taskbarRect)) return;
+
+    double rasterScale = taskbarFrame.XamlRoot() ? taskbarFrame.XamlRoot().RasterizationScale() : 1.0;
+    std::vector<FrameworkElement> buttons;
+    std::vector<FrameworkElement> stack{ taskbarFrame };
+    while (!stack.empty()) {
+        auto cur = stack.back();
+        stack.pop_back();
+        if (ClassifyButton(cur) == ButtonKind::App) {
+            buttons.push_back(cur);
+            continue;
+        }
+        int count = VisualTreeHelper::GetChildrenCount(cur);
+        for (int i = 0; i < count; ++i) {
+            if (auto ch = VisualTreeHelper::GetChild(cur, i).try_as<FrameworkElement>()) {
+                stack.push_back(ch);
+            }
+        }
+    }
+
+    struct TargetItem {
+        RECT rect;
+        double x;
+    };
+    std::vector<TargetItem> items;
+    items.reserve(buttons.size());
+
+    for (auto& btn : buttons) {
+        try {
+            auto t = btn.TransformToVisual(taskbarFrame);
+            auto pt = t.TransformPoint({0, 0});
+            LONG left = taskbarRect.left + static_cast<LONG>(pt.X * rasterScale);
+            LONG top = taskbarRect.top + static_cast<LONG>(pt.Y * rasterScale);
+            LONG width = static_cast<LONG>(btn.ActualWidth() * rasterScale);
+            LONG height = static_cast<LONG>(btn.ActualHeight() * rasterScale);
+            if (width > 0 && height > 0) {
+                items.push_back({ { left, top, left + width, top + height }, pt.X });
+            }
+        } catch (...) {}
+    }
+
+    std::sort(items.begin(), items.end(), [](const TargetItem& a, const TargetItem& b) {
+        return a.x < b.x;
+    });
+
+    std::vector<RECT> targets;
+    targets.reserve(items.size());
+    for (auto& item : items) {
+        targets.push_back(item.rect);
+    }
+
+    Lightency::DragDropAssist::UpdateTargets(key, targetHwnd, targets);
+}
+
+
 static bool ShouldAnimateElement(FrameworkElement const& e) {
 
     const int mode = g_settings.excludeSystemButtonsMode;
@@ -2544,6 +2729,16 @@ void RefreshIconPositions(DockAnimationContext& ctx) {
 
 
         ctx.icons = std::move(newIcons);
+        if (auto frame = ctx.taskbarFrame.get()) {
+            void* pKey = nullptr;
+            for (auto& pair : g_contexts) {
+                if (&pair.second == &ctx) {
+                    pKey = pair.first;
+                    break;
+                }
+            }
+            if (pKey) UpdateDragDropTargets(pKey, frame, ctx.hWnd);
+        }
 
 
     } catch (winrt::hresult_error const& e) {
@@ -3181,6 +3376,9 @@ void Wh_ModBeforeUninit() {
                     if (auto element = sub->element.get()) {
                         element.PointerMoved(sub->movedToken);
                         element.PointerExited(sub->exitedToken);
+                        if (sub->layoutUpdated) {
+                            element.LayoutUpdated(sub->layoutUpdatedToken);
+                        }
                     }
                 } catch (...) {}
             }, &subscription);
@@ -3319,71 +3517,89 @@ void Wh_ModSettingsChanged() {
         RestoreTrayVisibility();
     }
 
-
-    std::map<HWND, std::vector<DockAnimationContext*>> windowContexts;
-
-    for (auto& pair : g_contexts) {
-
-        auto& ctx = pair.second;
-
-        HWND hWnd = ctx.hWnd ? ctx.hWnd : FindWindow(L"Shell_TrayWnd", NULL);
-
-        if (hWnd) {
-
-            windowContexts[hWnd].push_back(&ctx);
-
+    Lightency::DragDropAssist::SetEnabled(g_lightencyDockConfig.dragDropAssist);
+    if (g_lightencyDockConfig.dragDropAssist) {
+        for (auto& pair : g_contexts) {
+            if (auto frame = pair.second.taskbarFrame.get()) {
+                UpdateDragDropTargets(pair.first, frame, pair.second.hWnd);
+            }
         }
-
     }
 
 
-    for (auto& pair : windowContexts) {
+    std::map<HWND, std::vector<DockAnimationContext*>> windowContexts;
+    std::map<HWND, std::vector<winrt::weak_ref<FrameworkElement>>> windowFrames;
 
-        HWND hWnd = pair.first;
+    for (auto& pair : g_contexts) {
+        auto& ctx = pair.second;
+        HWND hWnd = ctx.hWnd ? ctx.hWnd : FindWindow(L"Shell_TrayWnd", NULL);
+        if (hWnd) {
+            windowContexts[hWnd].push_back(&ctx);
+            if (auto frame = ctx.taskbarFrame.get()) {
+                windowFrames[hWnd].push_back(ctx.taskbarFrame);
+            }
+        }
+    }
 
-        std::vector<DockAnimationContext*> ctxs = std::move(pair.second);
+    for (auto& [key, subscription] : g_xamlSubscriptions) {
+        HWND hWnd = FindWindowW(L"Shell_TrayWnd", nullptr);
+        auto itCtx = g_contexts.find(key);
+        if (itCtx != g_contexts.end() && itCtx->second.hWnd) {
+            hWnd = itCtx->second.hWnd;
+        }
+        if (hWnd && subscription.element) {
+            windowFrames[hWnd].push_back(subscription.element);
+        }
+    }
 
-        std::function<void()> action = [ctxs = std::move(ctxs)]() {
+    std::set<HWND> allHwnds;
+    for (auto& pair : windowContexts) allHwnds.insert(pair.first);
+    for (auto& pair : windowFrames) allHwnds.insert(pair.first);
 
+    for (HWND hWnd : allHwnds) {
+        std::vector<DockAnimationContext*> ctxs;
+        auto itC = windowContexts.find(hWnd);
+        if (itC != windowContexts.end()) {
+            ctxs = std::move(itC->second);
+        }
+
+        std::vector<winrt::weak_ref<FrameworkElement>> frames;
+        auto itF = windowFrames.find(hWnd);
+        if (itF != windowFrames.end()) {
+            frames = std::move(itF->second);
+        }
+
+        std::function<void()> action = [ctxs = std::move(ctxs), frames = std::move(frames)]() {
             try {
-
                 for (auto* ctx : ctxs) {
-
                     ResetAllIconScales(ctx->icons);
-
                     if (auto frame = ctx->taskbarFrame.get()) {
                         ApplyTaskbarAppearance(frame);
                         ApplyTrayItemVisibility(frame);
                     }
-
                     ctx->isInitialized = false;
-
                     ctx->icons.clear();
-
                 }
 
+                for (auto& weakFrame : frames) {
+                    if (auto frame = weakFrame.get()) {
+                        ApplyTaskbarAppearance(frame);
+                        ApplyTrayItemVisibility(frame);
+                    }
+                }
             } catch (...) {}
-
         };
 
         RunFromWindowThread(
-
             hWnd,
-
             [](PVOID p) {
-
                 auto* fn = static_cast<std::function<void()>*>(p);
-
                 (*fn)();
-
             },
-
             &action);
-
     }
 
     g_isBouncing = false;
-
 }
 
 namespace Lightency {
@@ -3420,9 +3636,39 @@ void DockAnimation::AttachXamlElement(IUnknown* object) {
             }
         };
         subscription.exited = [key](auto const&, auto const&) { OnTaskbarPointerExited(key); };
+        if (taskbar) {
+            StartButtonStyle::AttachTaskbar(object);
+            HWND hWnd = FindWindowW(L"Shell_TrayWnd", nullptr);
+            auto it = g_contexts.find(key);
+            if (it != g_contexts.end() && it->second.hWnd) hWnd = it->second.hWnd;
+            UpdateDragDropTargets(key, element, hWnd);
+            subscription.layoutUpdated = [key, weak = winrt::make_weak(element)](auto const&, auto const&) {
+                try {
+                    if (auto frame = weak.get()) {
+                        EnsureLiveConfigMapped();
+                        HWND h = FindWindowW(L"Shell_TrayWnd", nullptr);
+                        auto itCtx = g_contexts.find(key);
+                        if (itCtx != g_contexts.end() && itCtx->second.hWnd) h = itCtx->second.hWnd;
+                        UpdateDragDropTargets(key, frame, h);
+                    }
+                } catch (...) {}
+            };
+        } else {
+            subscription.layoutUpdated = [weak = winrt::make_weak(element)](auto const&, auto const&) {
+                try {
+                    if (auto frame = weak.get()) {
+                        EnsureLiveConfigMapped();
+                        ApplyTrayItemVisibility(frame);
+                    }
+                } catch (...) {}
+            };
+        }
         subscription.movedToken = element.PointerMoved(subscription.moved);
         try {
             subscription.exitedToken = element.PointerExited(subscription.exited);
+            if (subscription.layoutUpdated) {
+                subscription.layoutUpdatedToken = element.LayoutUpdated(subscription.layoutUpdated);
+            }
         } catch (...) {
             element.PointerMoved(subscription.movedToken);
             throw;
@@ -3441,11 +3687,14 @@ bool DockAnimation::Initialize() {
         g_startMenuWinEventHook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_LOCATIONCHANGE,
             nullptr, StartMenuWinEventProc, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     }
+    Lightency::DragDropAssist::SetEnabled(g_lightencyDockConfig.dragDropAssist);
     return XamlBridge::Initialize();
 }
 
 void DockAnimation::Shutdown() {
     LogDock(L"DockAnimation::Shutdown");
+    Lightency::DragDropAssist::Shutdown();
+    StartButtonStyle::Shutdown();
     XamlBridge::Shutdown();
     Wh_ModBeforeUninit();
 }
@@ -3453,11 +3702,13 @@ void DockAnimation::Shutdown() {
 void DockAnimation::UpdateSettings(const SharedHookConfig& config) {
     LogDock(std::wstring(L"DockAnimation::UpdateSettings enabled=") + std::to_wstring(config.dockAnimation) + L" scale=" + std::to_wstring(config.maxScale) + L" radius=" + std::to_wstring(config.effectRadius));
     g_lightencyDockConfig = config;
+    StartButtonStyle::UpdateSettings(config);
     Wh_ModSettingsChanged();
 }
 
 void DockAnimation::RefreshSettings() {
     EnsureLiveConfigMapped();
+    StartButtonStyle::RefreshSettings();
     Wh_ModSettingsChanged();
 }
 

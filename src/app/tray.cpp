@@ -15,10 +15,16 @@ void TrayManager::Reset() {
 }
 
 bool TrayManager::Create(HWND hWnd) {
+    if (!hWnd) return false;
+
     if (!g_hTrayIcon) {
         int iconSize = GetSystemMetrics(SM_CXSMICON);
         if (iconSize <= 0) iconSize = 16;
         g_hTrayIcon = IconGenerator::CreateMinimalistIcon(iconSize);
+        if (!g_hTrayIcon) {
+            SetTimer(hWnd, IDT_TRAY_RETRY, 1000, nullptr);
+            return false;
+        }
     }
 
     ZeroMemory(&g_nid, sizeof(g_nid));
@@ -28,10 +34,12 @@ bool TrayManager::Create(HWND hWnd) {
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
     g_nid.hIcon = g_hTrayIcon;
+    g_nid.uVersion = NOTIFYICON_VERSION_4;
 
     wcsncpy_s(g_nid.szTip, _countof(g_nid.szTip), L"Lightency", _TRUNCATE);
 
     if (Shell_NotifyIconW(NIM_ADD, &g_nid) || Shell_NotifyIconW(NIM_MODIFY, &g_nid)) {
+        Shell_NotifyIconW(NIM_SETVERSION, &g_nid);
         g_created = true;
         KillTimer(hWnd, IDT_TRAY_RETRY);
         return true;
@@ -48,6 +56,7 @@ void TrayManager::Destroy(HWND hWnd) {
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         g_created = false;
     }
+    ZeroMemory(&g_nid, sizeof(g_nid));
 
     if (g_hTrayIcon) {
         DestroyIcon(g_hTrayIcon);
@@ -57,7 +66,7 @@ void TrayManager::Destroy(HWND hWnd) {
 
 void TrayManager::ShowContextMenu(HWND hWnd, const AppConfig&) {
     POINT pt;
-    GetCursorPos(&pt);
+    if (!GetCursorPos(&pt)) return;
 
     HMENU hMenu = CreatePopupMenu();
     if (!hMenu) return;
