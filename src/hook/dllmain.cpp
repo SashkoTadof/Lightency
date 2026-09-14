@@ -38,13 +38,19 @@ static bool IsOwnerProcessAlive(DWORD pid) {
     return alive;
 }
 
+static std::thread g_workerThread;
+
 static void StartExtensionWorker(HMODULE hModule) {
     if (g_workerRunning.exchange(true, std::memory_order_acq_rel)) {
         if (hModule) FreeLibrary(hModule);
         return;
     }
 
-    std::thread([hModule]() {
+    if (g_workerThread.joinable()) {
+        g_workerThread.join();
+    }
+
+    g_workerThread = std::thread([hModule]() {
         WriteDiagnostic("explorer", "Extension worker started");
         const bool ready = Lightency::DockAnimation::Initialize();
         g_hookReady.store(ready, std::memory_order_release);
@@ -67,10 +73,18 @@ static void StartExtensionWorker(HMODULE hModule) {
         auto* config = mapping ? static_cast<Lightency::SharedHookConfig*>(
             MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, sizeof(Lightency::SharedHookConfig))) : nullptr;
 
-        while (config) {
-            Sleep(250);
-            const DWORD ownerPid = config->masterPid;
-            if (ownerPid == 0 || !IsOwnerProcessAlive(ownerPid)) break;
+        if (config) {
+            UINT_PTR timerId = SetTimer(nullptr, 0, 250, nullptr);
+            MSG msg;
+            while (GetMessageW(&msg, nullptr, 0, 0)) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+                if (msg.message == WM_TIMER && msg.wParam == timerId) {
+                    const DWORD ownerPid = config->masterPid;
+                    if (ownerPid == 0 || !IsOwnerProcessAlive(ownerPid)) break;
+                }
+            }
+            KillTimer(nullptr, timerId);
         }
 
         g_hookReady.store(false, std::memory_order_release);
@@ -80,7 +94,7 @@ static void StartExtensionWorker(HMODULE hModule) {
         g_workerRunning.store(false, std::memory_order_release);
         WriteDiagnostic("explorer", "Extension worker stopped");
         if (hModule) FreeLibraryAndExitThread(hModule, 0);
-    }).detach();
+    });
 }
 
 extern "C" __declspec(dllexport) LRESULT CALLBACK LightencyHookProc(
@@ -132,10 +146,8 @@ extern "C" __declspec(dllexport) LRESULT CALLBACK LightencyCbtProc(
             auto* ipc = static_cast<Lightency::WindowAnimationIpc*>(MapViewOfFile(
                 mapping, FILE_MAP_READ, 0, 0, sizeof(Lightency::WindowAnimationIpc)));
             if (ipc && ipc->enabled && IsWindow(ipc->receiverWindow)) {
-                DWORD_PTR ignored = 0;
-                SendMessageTimeoutW(ipc->receiverWindow,
-                    Lightency::GetWindowAnimationEarlyMsg(), wParam, 0,
-                    SMTO_ABORTIFHUNG | SMTO_BLOCK, 140, &ignored);
+                PostMessageW(ipc->receiverWindow,
+                    Lightency::GetWindowAnimationEarlyMsg(), wParam, 0);
             }
             if (ipc) UnmapViewOfFile(ipc);
             CloseHandle(mapping);
@@ -147,11 +159,6 @@ extern "C" __declspec(dllexport) LRESULT CALLBACK LightencyCbtProc(
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
-        if (IsExplorerProcess()) {
-            HMODULE hSelf = nullptr;
-            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(StartExtensionWorker), &hSelf);
-            StartExtensionWorker(hSelf);
-        }
     } else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
         if (IsStartMenuProcess()) {
             Lightency::StartMenuSize::Shutdown();

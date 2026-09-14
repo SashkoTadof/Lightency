@@ -13,35 +13,10 @@ namespace {
     std::vector<HHOOK> g_startMenuThreadHooks;
     std::vector<DWORD> g_startMenuThreadIds;
     DWORD g_startMenuHostPid = 0;
-    void NudgeRealPointerOverTaskbar(HWND taskbar) {
-
-        if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) ||
-            (GetAsyncKeyState(VK_RBUTTON) & 0x8000) ||
-            (GetAsyncKeyState(VK_MBUTTON) & 0x8000)) {
-            return;
-        }
-
-        POINT original{};
-        RECT bounds{};
-        if (!GetCursorPos(&original) || !GetWindowRect(taskbar, &bounds)) return;
-        if (bounds.right - bounds.left < 4 || bounds.bottom <= bounds.top) return;
-
-        const int targetX = bounds.left + (bounds.right - bounds.left) / 2;
-        const int targetY = bounds.top + (bounds.bottom - bounds.top) / 2;
-        SetCursorPos(targetX, targetY);
-        Sleep(8);
-        SetCursorPos(targetX + 1, targetY);
-        Sleep(8);
-        SetCursorPos(original.x, original.y);
-    }
-
     void NotifyTaskbar(HWND taskbar, UINT msg, WPARAM wParam, LPARAM lParam) {
-
-
         DWORD_PTR result = 0;
         SendMessageTimeoutW(taskbar, msg, wParam, lParam,
                             SMTO_ABORTIFHUNG | SMTO_BLOCK, 250, &result);
-        NudgeRealPointerOverTaskbar(taskbar);
     }
 
     void BroadcastToTaskbars(UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -342,16 +317,18 @@ bool Injector::Initialize() {
 void Injector::Shutdown() {
     if (s_pSharedMemory) {
         auto* pCfg = static_cast<SharedHookConfig*>(s_pSharedMemory);
+        pCfg->BeginWrite();
         pCfg->dockAnimation = false;
         pCfg->startMenuSizing = false;
         pCfg->masterPid = 0;
+        pCfg->EndWrite();
     }
 
     BroadcastToTaskbars(Lightency::GetLightencyUpdateMsg(), 0, 0);
-    if (s_hStartMenuWindow) SendMessageTimeoutW(s_hStartMenuWindow,
-        Lightency::GetLightencyUpdateMsg(), 0, 0, SMTO_ABORTIFHUNG, 500, nullptr);
-
-    Sleep(120);
+    if (s_hStartMenuWindow) {
+        DWORD_PTR res = 0;
+        SendMessageTimeoutW(s_hStartMenuWindow, Lightency::GetLightencyUpdateMsg(), 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 200, &res);
+    }
 
     if (s_hExplorerHook) {
         UnhookWindowsHookEx(s_hExplorerHook);
@@ -383,6 +360,10 @@ void Injector::Shutdown() {
 }
 
 void Injector::Invalidate() {
+    if (s_hExplorerHook) {
+        UnhookWindowsHookEx(s_hExplorerHook);
+        s_hExplorerHook = nullptr;
+    }
     if (s_hStartMenuHook) {
         UnhookWindowsHookEx(s_hStartMenuHook);
         s_hStartMenuHook = nullptr;
@@ -416,6 +397,7 @@ void Injector::Update(const AppConfig& config) {
     }
     if (s_pSharedMemory) {
         auto* pCfg = static_cast<SharedHookConfig*>(s_pSharedMemory);
+        pCfg->BeginWrite();
         pCfg->dockAnimation = config.dockAnimation;
         pCfg->maxScale = config.dockMaxScale;
         pCfg->effectRadius = config.dockRadius;
@@ -453,6 +435,7 @@ void Injector::Update(const AppConfig& config) {
         pCfg->startIconAccentColor = config.startIconAccentColor;
         pCfg->startIconColorHue = config.startIconColorHue;
         pCfg->masterPid = GetCurrentProcessId();
+        pCfg->EndWrite();
     }
 
     BroadcastToTaskbars(Lightency::GetLightencyUpdateMsg(), 0, 0);

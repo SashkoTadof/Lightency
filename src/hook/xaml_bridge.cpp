@@ -9,6 +9,8 @@
 #include "dock_animation.h"
 #include "../common/diagnostics.h"
 
+#include <future>
+
 using namespace Microsoft::WRL;
 namespace {
 const CLSID bridgeClass = {0x5031c518, 0x20a6, 0x4b63, {0x98, 0x1c, 0x54, 0x2e, 0x57, 0x28, 0xab, 0xe1}};
@@ -17,6 +19,7 @@ std::atomic<bool> enabled{false};
 class Site;
 static ComPtr<Site> s_activeSite;
 static std::mutex s_siteMutex;
+static std::future<void> s_adviseFuture;
 
 class Site final : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IObjectWithSite,
     IVisualTreeServiceCallback2> {
@@ -31,18 +34,17 @@ public:
         hr = site->QueryInterface(IID_PPV_ARGS(&tree));
         if (FAILED(hr)) return hr;
 
+        ComPtr<Site> self(this);
         {
             std::lock_guard<std::mutex> lock(s_siteMutex);
             s_activeSite = this;
+            s_adviseFuture = std::async(std::launch::async, [self]() {
+                HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+                HRESULT result = self->tree->AdviseVisualTreeChange(self.Get());
+                WriteDiagnostic("explorer", "XAML AdviseVisualTreeChange hr=" + std::to_string(result));
+                if (SUCCEEDED(apartment)) CoUninitialize();
+            });
         }
-
-        ComPtr<Site> self(this);
-        std::thread([self]() {
-            HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-            HRESULT result = self->tree->AdviseVisualTreeChange(self.Get());
-            WriteDiagnostic("explorer", "XAML AdviseVisualTreeChange hr=" + std::to_string(result));
-            if (SUCCEEDED(apartment)) CoUninitialize();
-        }).detach();
         return S_OK;
     }
 
@@ -106,18 +108,18 @@ bool Lightency::XamlBridge::Initialize() {
         std::lock_guard<std::mutex> lock(s_siteMutex);
         if (s_activeSite && s_activeSite->tree) {
             ComPtr<Site> site = s_activeSite;
-            std::thread([site]() {
+            s_adviseFuture = std::async(std::launch::async, [site]() {
                 HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
                 HRESULT result = site->tree->AdviseVisualTreeChange(site.Get());
                 WriteDiagnostic("explorer", "XAML re-AdviseVisualTreeChange hr=" + std::to_string(result));
                 if (SUCCEEDED(apartment)) CoUninitialize();
-            }).detach();
+            });
             return true;
         }
     }
 
     HMODULE current = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
         reinterpret_cast<LPCWSTR>(&Initialize), &current)) return false;
     wchar_t path[32768]{};
     if (!GetModuleFileNameW(current, path, ARRAYSIZE(path))) return false;
@@ -136,6 +138,13 @@ bool Lightency::XamlBridge::Initialize() {
 
 void Lightency::XamlBridge::Shutdown() {
     enabled = false;
+    std::future<void> fut;
+    {
+        std::lock_guard<std::mutex> lock(s_siteMutex);
+        fut = std::move(s_adviseFuture);
+    }
+    if (fut.valid()) fut.wait();
+
     std::lock_guard<std::mutex> lock(s_siteMutex);
     if (s_activeSite && s_activeSite->tree) {
         s_activeSite->tree->UnadviseVisualTreeChange(s_activeSite.Get());

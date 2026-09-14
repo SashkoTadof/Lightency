@@ -173,31 +173,6 @@ std::string WindowState(const char* stage) {
     return buffer;
 }
 
-bool SendKey(WORD key, DWORD flags) {
-    INPUT input{};
-    input.type = INPUT_KEYBOARD;
-    input.ki.wVk = key;
-    input.ki.dwFlags = flags;
-    const bool sent = SendInput(1, &input, sizeof(input)) == 1;
-    Sleep(3);
-    return sent;
-}
-
-bool SendWinT() {
-    INPUT inputs[4]{};
-    inputs[0].type = INPUT_KEYBOARD;
-    inputs[0].ki.wVk = VK_LWIN;
-    inputs[1].type = INPUT_KEYBOARD;
-    inputs[1].ki.wVk = 'T';
-    inputs[2].type = INPUT_KEYBOARD;
-    inputs[2].ki.wVk = 'T';
-    inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
-    inputs[3].type = INPUT_KEYBOARD;
-    inputs[3].ki.wVk = VK_LWIN;
-    inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
-    return SendInput(ARRAYSIZE(inputs), inputs, sizeof(INPUT)) == ARRAYSIZE(inputs);
-}
-
 bool ActivateTaskbarButton(IUIAutomation* automation, POINT point) {
     if (!automation) return false;
     IUIAutomationElement* element = nullptr;
@@ -260,174 +235,167 @@ bool Activate(IUIAutomation* automation, POINT center, HWND taskbar, unsigned in
     if (directActivation) {
         Sleep(120);
         WriteDiagnostic("explorer", WindowState("DragDrop after direct activation"));
-        return true;
     }
+    return directActivation;
+}
 
-    const BOOL foregroundResult = SetForegroundWindow(taskbar);
-    WriteDiagnostic("explorer", "DragDrop SetForegroundWindow=" + std::to_string(foregroundResult));
-    Sleep(10);
-    bool ok = SendWinT();
-    if (ok) {
-        Sleep(20);
-        for (unsigned int i = 0; i < index; ++i) {
-            ok &= SendKey(VK_RIGHT, 0);
-            ok &= SendKey(VK_RIGHT, KEYEVENTF_KEYUP);
+static IUIAutomation* g_automation = nullptr;
+static HHOOK g_mouseHook = nullptr;
+static bool g_buttonWasDown = false;
+static bool g_startedOnTaskbar = false;
+static bool g_dragSession = false;
+static ULONGLONG g_buttonUpSince = 0;
+static void* g_hoverTaskbar = nullptr;
+static int g_hoverIndex = -1;
+static POINT g_hoverAnchor{};
+static ULONGLONG g_hoverStarted = 0;
+static bool g_activationArmed = true;
+static void* g_activatedTaskbar = nullptr;
+static int g_activatedIndex = -1;
+static POINT g_activationPoint{};
+
+LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode >= 0 && enabled.load(std::memory_order_acquire)) {
+        if (wParam == WM_MOUSEMOVE || wParam == WM_LBUTTONDOWN || wParam == WM_LBUTTONUP ||
+            wParam == WM_RBUTTONDOWN || wParam == WM_RBUTTONUP) {
+            
+            MSLLHOOKSTRUCT* pMouse = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
+            POINT cursor = pMouse->pt;
+            
+            const bool buttonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 ||
+                                  (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+
+            const auto tickNow = GetTickCount64();
+            if (buttonDown && !g_buttonWasDown) {
+                if (!g_dragSession) {
+                    g_startedOnTaskbar = false;
+                    g_activationArmed = true;
+                    g_activatedTaskbar = nullptr;
+                    g_activatedIndex = -1;
+                    std::lock_guard<std::mutex> lock(targetsMutex);
+                    for (const auto& pair : targetSets) {
+                        if (Contains(pair.second.taskbarRect, cursor)) {
+                            g_startedOnTaskbar = true;
+                            break;
+                        }
+                    }
+                    g_dragSession = !g_startedOnTaskbar;
+                } else {
+                    g_startedOnTaskbar = false;
+                }
+                g_buttonUpSince = 0;
+            }
+
+            if (!buttonDown) {
+                if (!g_buttonUpSince) g_buttonUpSince = tickNow;
+                if (g_dragSession && tickNow - g_buttonUpSince >= 500) {
+                    g_dragSession = false;
+                    g_activationArmed = true;
+                    g_activatedTaskbar = nullptr;
+                    g_activatedIndex = -1;
+                }
+            }
+
+            if (!buttonDown || !g_dragSession || g_startedOnTaskbar) {
+                g_hoverTaskbar = nullptr;
+                g_hoverIndex = -1;
+            } else {
+                void* foundTaskbar = nullptr;
+                int foundIndex = -1;
+                HWND foundWindow = nullptr;
+                POINT foundCenter{};
+                {
+                    std::lock_guard<std::mutex> lock(targetsMutex);
+                    for (const auto& pair : targetSets) {
+                        long long bestDistance = LLONG_MAX;
+                        const bool insideAppStrip = Contains(pair.second.taskbarRect, cursor) &&
+                            cursor.x >= pair.second.appsLeft && cursor.x < pair.second.appsRight;
+                        if (insideAppStrip) {
+                            for (size_t i = 0; i < pair.second.apps.size(); ++i) {
+                                POINT center{
+                                    (pair.second.apps[i].left + pair.second.apps[i].right) / 2,
+                                    (pair.second.apps[i].top + pair.second.apps[i].bottom) / 2
+                                };
+                                const long long dx = cursor.x - center.x;
+                                const long long dy = cursor.y - center.y;
+                                const long long distance = dx * dx + dy * dy;
+                                if (distance < bestDistance) {
+                                    bestDistance = distance;
+                                    foundTaskbar = pair.first;
+                                    foundIndex = static_cast<int>(i);
+                                    foundWindow = pair.second.window;
+                                    foundCenter = center;
+                                }
+                            }
+                        }
+                        if (foundIndex >= 0) break;
+                    }
+                }
+
+                const auto now = GetTickCount64();
+                if (!g_activationArmed &&
+                    (abs(cursor.x - g_activationPoint.x) > 8 || abs(cursor.y - g_activationPoint.y) > 8)) {
+                    g_activationArmed = true;
+                }
+                if (foundTaskbar != g_hoverTaskbar || foundIndex != g_hoverIndex) {
+                    g_hoverTaskbar = foundTaskbar;
+                    g_hoverIndex = foundIndex;
+                    g_hoverAnchor = cursor;
+                    g_hoverStarted = now;
+                } else if (foundIndex >= 0 &&
+                    (abs(cursor.x - g_hoverAnchor.x) > 5 || abs(cursor.y - g_hoverAnchor.y) > 5)) {
+                    g_hoverAnchor = cursor;
+                    g_hoverStarted = now;
+                } else if (foundIndex >= 0 && g_activationArmed &&
+                    (foundTaskbar != g_activatedTaskbar || foundIndex != g_activatedIndex) &&
+                    now - g_hoverStarted >= 300) {
+                    g_activationArmed = false;
+                    g_activatedTaskbar = foundTaskbar;
+                    g_activatedIndex = foundIndex;
+                    g_activationPoint = cursor;
+                    Activate(g_automation, cursor, foundWindow, static_cast<unsigned int>(foundIndex));
+                }
+            }
+            g_buttonWasDown = buttonDown;
         }
     }
-    ok &= SendKey(VK_UP, 0);
-    ok &= SendKey(VK_UP, KEYEVENTF_KEYUP);
-    Sleep(10);
-    WriteDiagnostic("explorer", WindowState("DragDrop after Up"));
-    ok &= SendKey(VK_RETURN, 0);
-    ok &= SendKey(VK_RETURN, KEYEVENTF_KEYUP);
-    Sleep(80);
-    WriteDiagnostic("explorer", WindowState("DragDrop after Enter"));
-    return ok;
+    return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
 
 DWORD WINAPI Watcher(void*) {
     const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    IUIAutomation* automation = nullptr;
     CoCreateInstance(CLSID_CUIAutomation8, nullptr, CLSCTX_INPROC_SERVER,
-        IID_PPV_ARGS(&automation));
-    bool buttonWasDown = false;
-    bool startedOnTaskbar = false;
-    bool dragSession = false;
-    ULONGLONG buttonUpSince = 0;
-    void* hoverTaskbar = nullptr;
-    int hoverIndex = -1;
-    POINT hoverAnchor{};
-    ULONGLONG hoverStarted = 0;
-    bool activationArmed = true;
-    void* activatedTaskbar = nullptr;
-    int activatedIndex = -1;
-    POINT activationPoint{};
+        IID_PPV_ARGS(&g_automation));
 
-    while (enabled.load(std::memory_order_acquire)) {
-        POINT cursor{};
-        GetCursorPos(&cursor);
-        const bool buttonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 ||
-            (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
-
-        const auto tickNow = GetTickCount64();
-        if (buttonDown && !buttonWasDown) {
-            if (!dragSession) {
-                startedOnTaskbar = false;
-                activationArmed = true;
-                activatedTaskbar = nullptr;
-                activatedIndex = -1;
-                std::lock_guard<std::mutex> lock(targetsMutex);
-                for (const auto& pair : targetSets) {
-                    if (Contains(pair.second.taskbarRect, cursor)) {
-                        startedOnTaskbar = true;
-                        break;
-                    }
-                }
-                dragSession = !startedOnTaskbar;
-            } else {
-                startedOnTaskbar = false;
-            }
-            buttonUpSince = 0;
-            WriteDiagnostic("explorer", "DragDrop mouse down x=" + std::to_string(cursor.x) +
-                " y=" + std::to_string(cursor.y) + " startedOnTaskbar=" +
-                std::to_string(startedOnTaskbar) + " continuation=" +
-                std::to_string(dragSession) + " sets=" + std::to_string(targetSets.size()));
-        }
-
-        if (!buttonDown) {
-            if (!buttonUpSince) buttonUpSince = tickNow;
-            if (dragSession && tickNow - buttonUpSince >= 500) {
-                dragSession = false;
-                activationArmed = true;
-                activatedTaskbar = nullptr;
-                activatedIndex = -1;
-            }
-        }
-
-        if (!buttonDown || !dragSession || startedOnTaskbar) {
-            hoverTaskbar = nullptr;
-            hoverIndex = -1;
-        } else {
-            void* foundTaskbar = nullptr;
-            int foundIndex = -1;
-            HWND foundWindow = nullptr;
-            POINT foundCenter{};
-            {
-                std::lock_guard<std::mutex> lock(targetsMutex);
-                for (const auto& pair : targetSets) {
-                    long long bestDistance = LLONG_MAX;
-                    const bool insideAppStrip = Contains(pair.second.taskbarRect, cursor) &&
-                        cursor.x >= pair.second.appsLeft && cursor.x < pair.second.appsRight;
-                    if (insideAppStrip) {
-                        for (size_t i = 0; i < pair.second.apps.size(); ++i) {
-                            POINT center{
-                                (pair.second.apps[i].left + pair.second.apps[i].right) / 2,
-                                (pair.second.apps[i].top + pair.second.apps[i].bottom) / 2
-                            };
-                            const long long dx = cursor.x - center.x;
-                            const long long dy = cursor.y - center.y;
-                            const long long distance = dx * dx + dy * dy;
-                            if (distance < bestDistance) {
-                                bestDistance = distance;
-                                foundTaskbar = pair.first;
-                                foundIndex = static_cast<int>(i);
-                                foundWindow = pair.second.window;
-                                foundCenter = center;
-                            }
-                        }
-                    }
-                    if (foundIndex >= 0) break;
-                }
-            }
-
-            const auto now = GetTickCount64();
-            if (!activationArmed &&
-                (abs(cursor.x - activationPoint.x) > 8 || abs(cursor.y - activationPoint.y) > 8)) {
-                activationArmed = true;
-            }
-            if (foundTaskbar != hoverTaskbar || foundIndex != hoverIndex) {
-                hoverTaskbar = foundTaskbar;
-                hoverIndex = foundIndex;
-                hoverAnchor = cursor;
-                hoverStarted = now;
-                if (foundIndex >= 0) {
-                    WriteDiagnostic("explorer", "DragDrop hover target index=" +
-                        std::to_string(foundIndex) + " x=" + std::to_string(cursor.x) +
-                        " y=" + std::to_string(cursor.y));
-                }
-            } else if (foundIndex >= 0 &&
-                (abs(cursor.x - hoverAnchor.x) > 5 || abs(cursor.y - hoverAnchor.y) > 5)) {
-                hoverAnchor = cursor;
-                hoverStarted = now;
-            } else if (foundIndex >= 0 && activationArmed &&
-                (foundTaskbar != activatedTaskbar || foundIndex != activatedIndex) &&
-                now - hoverStarted >= 300) {
-                activationArmed = false;
-                activatedTaskbar = foundTaskbar;
-                activatedIndex = foundIndex;
-                activationPoint = cursor;
-                const bool result = Activate(automation, cursor, foundWindow,
-                    static_cast<unsigned int>(foundIndex));
-                WriteDiagnostic("explorer", "DragDrop watcher activation index=" +
-                    std::to_string(foundIndex) + " result=" + std::to_string(result));
-            }
-        }
-
-        buttonWasDown = buttonDown;
-        const DWORD sleepDuration = (buttonDown || dragSession) ? 15 : 60;
-        Sleep(sleepDuration);
+    g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseHookProc, GetModuleHandleW(nullptr), 0);
+    
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!enabled.load(std::memory_order_acquire)) break;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
     }
 
-    if (automation) automation->Release();
+    if (g_mouseHook) {
+        UnhookWindowsHookEx(g_mouseHook);
+        g_mouseHook = nullptr;
+    }
+
+    if (g_automation) {
+        g_automation->Release();
+        g_automation = nullptr;
+    }
     if (SUCCEEDED(apartment)) CoUninitialize();
     workerRunning.store(false, std::memory_order_release);
     return 0;
 }
 
+static DWORD g_watcherThreadId = 0;
+
 void StartWatcher() {
     if (workerRunning.exchange(true, std::memory_order_acq_rel)) return;
     HANDLE thread = CreateThread(nullptr, 64 * 1024, Watcher, nullptr,
-        STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+        STACK_SIZE_PARAM_IS_A_RESERVATION, &g_watcherThreadId);
     if (thread) CloseHandle(thread);
     else workerRunning.store(false, std::memory_order_release);
 }
@@ -436,7 +404,12 @@ void StartWatcher() {
 void Lightency::DragDropAssist::SetEnabled(bool value) {
     enabled.store(value, std::memory_order_release);
     WriteDiagnostic("explorer", "DragDrop watcher enabled=" + std::to_string(value));
-    if (value) StartWatcher();
+    if (value) {
+        StartWatcher();
+    } else if (g_watcherThreadId) {
+        PostThreadMessageW(g_watcherThreadId, WM_QUIT, 0, 0);
+        g_watcherThreadId = 0;
+    }
 }
 
 void Lightency::DragDropAssist::UpdateTargets(void* taskbar, HWND window,

@@ -72,7 +72,7 @@ HslColor GetSystemAccentHsl() {
         winrt::Windows::UI::ViewManagement::UISettings uiSettings;
         auto color = uiSettings.GetColorValue(winrt::Windows::UI::ViewManagement::UIColorType::Accent);
         return RgbToHsl(color);
-    } catch (...) {
+    } catch (const winrt::hresult_error&) {
         return HslColor{210.0, 1.0, 0.5};
     }
 }
@@ -95,7 +95,7 @@ SharedHookConfig GetCurrentHookConfig() {
     if (hMap) {
         auto* p = static_cast<SharedHookConfig*>(MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, sizeof(SharedHookConfig)));
         if (p) {
-            SharedHookConfig cfg = *p;
+            SharedHookConfig cfg = SharedHookConfig::Read(p);
             UnmapViewOfFile(p);
             CloseHandle(hMap);
             return cfg;
@@ -128,7 +128,7 @@ FrameworkElement FindStartButton(FrameworkElement const& root) {
                     stack.push_back(child);
                 }
             }
-        } catch (...) {}
+        } catch (const winrt::hresult_error&) {}
     }
     return nullptr;
 }
@@ -147,7 +147,7 @@ FrameworkElement FindStartIcon(FrameworkElement const& startButton) {
                     stack.push_back(child);
                 }
             }
-        } catch (...) {}
+        } catch (const winrt::hresult_error&) {}
     }
     return nullptr;
 }
@@ -172,7 +172,7 @@ void ApplyIconScale(FrameworkElement const& icon, const SharedHookConfig& cfg) {
         const double factor = std::clamp(cfg.startIconSize, 40, 250) / 100.0;
         scale.ScaleX(factor);
         scale.ScaleY(factor);
-    } catch (...) {}
+    } catch (const winrt::hresult_error&) {}
 }
 
 void ApplyIconColors(FrameworkElement const& icon, const SharedHookConfig& cfg, const HslColor& accentHsl) {
@@ -220,7 +220,7 @@ void ApplyIconColors(FrameworkElement const& icon, const SharedHookConfig& cfg, 
 
         for (const auto& brush : brushList) {
             if (auto colorBrush = brush.try_as<Composition::CompositionColorBrush>()) {
-                try { colorBrush.StopAnimation(L"Color"); } catch (...) {}
+                try { colorBrush.StopAnimation(L"Color"); } catch (const winrt::hresult_error&) {}
                 void* key = winrt::get_abi(colorBrush);
                 auto it = g_baselineColors.find(key);
                 if (it == g_baselineColors.end()) {
@@ -245,7 +245,7 @@ void ApplyIconColors(FrameworkElement const& icon, const SharedHookConfig& cfg, 
                 colorBrush.Color(customEnabled ? TransformColor(base, cfg, accentHsl) : base);
             } else if (auto gradBrush = brush.try_as<Composition::CompositionGradientBrush>()) {
                 for (const auto& stop : gradBrush.ColorStops()) {
-                    try { stop.StopAnimation(L"Color"); } catch (...) {}
+                    try { stop.StopAnimation(L"Color"); } catch (const winrt::hresult_error&) {}
                     void* key = winrt::get_abi(stop);
                     auto it = g_baselineColors.find(key);
                     if (it == g_baselineColors.end()) {
@@ -271,7 +271,7 @@ void ApplyIconColors(FrameworkElement const& icon, const SharedHookConfig& cfg, 
                 }
             }
         }
-    } catch (...) {}
+    } catch (const winrt::hresult_error&) {}
 }
 
 UINT_PTR g_animTimerId = 0;
@@ -369,7 +369,7 @@ void AttachTaskbar(IUnknown* taskbarFrame) {
                 }
             });
         }
-    } catch (...) {}
+    } catch (const winrt::hresult_error&) {}
 }
 
 void UpdateSettings(const SharedHookConfig& config) {
@@ -398,7 +398,7 @@ void Shutdown() {
     if (g_uiSettings && g_accentToken.value != 0) {
         try {
             g_uiSettings.ColorValuesChanged(g_accentToken);
-        } catch (...) {}
+        } catch (const winrt::hresult_error&) {}
         g_accentToken = {};
         g_uiSettings = nullptr;
     }

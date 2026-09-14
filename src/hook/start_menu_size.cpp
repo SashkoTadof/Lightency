@@ -345,7 +345,7 @@ void Apply() {
             hosts.boundaryHost.Margin(Thickness{0, 0, 0, 0});
         }
         hosts.contentHost.InvalidateMeasure();
-    } catch (...) {
+    } catch (const winrt::hresult_error&) {
         WriteDiagnostic("start", "Apply failed hr=" + std::to_string(winrt::to_hresult()));
     }
     g_applying = false;
@@ -357,20 +357,21 @@ bool Load() {
     auto* config = static_cast<SharedHookConfig*>(MapViewOfFile(mapping,
         FILE_MAP_READ, 0, 0, sizeof(SharedHookConfig)));
     if (config) {
-        g_settings.enabled = config->startMenuSizing;
-        g_settings.hideSearch = config->startHideSearch;
-        g_settings.hidePinned = config->startHidePinned;
-        g_settings.hideRecommended = config->startHideRecommended;
-        g_settings.hideProfile = config->startHideProfile;
-        g_settings.hidePower = config->startHidePower;
-        g_settings.hideViewSelector = config->startHideViewSelector;
-        g_settings.hideFolders = config->startHideFolders;
+        SharedHookConfig cfg = SharedHookConfig::Read(config);
+        g_settings.enabled = cfg.startMenuSizing;
+        g_settings.hideSearch = cfg.startHideSearch;
+        g_settings.hidePinned = cfg.startHidePinned;
+        g_settings.hideRecommended = cfg.startHideRecommended;
+        g_settings.hideProfile = cfg.startHideProfile;
+        g_settings.hidePower = cfg.startHidePower;
+        g_settings.hideViewSelector = cfg.startHideViewSelector;
+        g_settings.hideFolders = cfg.startHideFolders;
         if (IsSearchHost()) {
-            g_settings.width = config->searchWidth;
-            g_settings.height = config->searchHeight;
+            g_settings.width = cfg.searchWidth;
+            g_settings.height = cfg.searchHeight;
         } else {
-            g_settings.width = config->startMenuWidth;
-            g_settings.height = config->startMenuHeight;
+            g_settings.width = cfg.startMenuWidth;
+            g_settings.height = cfg.startMenuHeight;
         }
         UnmapViewOfFile(config);
     }
@@ -409,7 +410,7 @@ bool RefreshSettings() {
             "x" + std::to_string(g_settings.height) + " enabled=" + std::to_string(g_settings.enabled) +
             " hidden=" + std::to_string(g_lastHiddenCount));
         return true;
-    } catch (...) {
+    } catch (const winrt::hresult_error&) {
         WriteDiagnostic("start", "Refresh failed hr=" + std::to_string(winrt::to_hresult()));
         return false;
     }
@@ -425,7 +426,7 @@ void Shutdown() {
         auto window = Window::Current();
         auto content = window ? window.Content().try_as<FrameworkElement>() : nullptr;
         if (content && g_layoutToken) content.LayoutUpdated(g_layoutToken);
-    } catch (...) {}
+    } catch (const winrt::hresult_error&) {}
     g_layoutToken = {};
 }
 }

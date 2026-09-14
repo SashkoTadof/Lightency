@@ -14,11 +14,7 @@
 
 static inline void LogDock(const std::wstring&) {}
 
-static Lightency::SharedHookConfig g_lightencyDockConfig = {
-    true, 135, 45, 50, 0, false, true, true, true,
-    false, false, false, false, false, false, false, false,
-    true, true, 0
-};
+static Lightency::SharedHookConfig g_lightencyDockConfig;
 static HANDLE s_hConfigMap = NULL;
 static Lightency::SharedHookConfig* s_pLiveSharedConfig = nullptr;
 static void RestoreDefaultLayout();
@@ -70,7 +66,7 @@ static void EnsureLiveConfigMapped() {
             newLayoutEditor != g_lightencyDockConfig.layoutEditor ||
             newDockAnim != g_lightencyDockConfig.dockAnimation) {
             bool layoutToggledOff = (g_lightencyDockConfig.layoutEditor && !newLayoutEditor);
-            g_lightencyDockConfig = *s_pLiveSharedConfig;
+            g_lightencyDockConfig = Lightency::SharedHookConfig::Read(s_pLiveSharedConfig);
             g_lightencyDockConfig.dockAnimation = newDockAnim;
             g_lightencyDockConfig.layoutEditor = newLayoutEditor;
             if (layoutToggledOff) {
@@ -169,7 +165,7 @@ static void RestoreTaskbarAppearance() {
                 }
                 el.Opacity(state.originalOpacity);
                 el.Visibility(state.originalVisibility);
-            } catch (...) {}
+            } catch (const winrt::hresult_error&) {}
         }
     }
     g_taskbarAppearanceStates.clear();
@@ -217,10 +213,12 @@ static void ApplyTaskbarAppearance(FrameworkElement const& taskbarElement) {
             stack.pop_back();
 
             const std::wstring name = element.Name().c_str();
-            const bool isFill = (name == L"BackgroundFill");
             bool isStroke = (name == L"BackgroundStroke" || name == L"TaskbarStroke" ||
                              name == L"TopBorder" || name == L"BackgroundBorder" ||
                              (!name.empty() && name.find(L"Stroke") != std::wstring::npos));
+            const bool isFill = (name == L"BackgroundFill" || 
+                                 (!isStroke && !name.empty() && name.find(L"Background") != std::wstring::npos));
+
 
             if (!isStroke && !isFill) {
                 if (auto s = element.try_as<winrt::Windows::UI::Xaml::Shapes::Shape>()) {
@@ -246,6 +244,16 @@ static void ApplyTaskbarAppearance(FrameworkElement const& taskbarElement) {
                         shape.Fill(it->second.originalFill);
                         shape.Stroke(it->second.originalStroke);
                         shape.StrokeThickness(it->second.originalStrokeThickness);
+                    }
+                } else if (auto border = element.try_as<winrt::Windows::UI::Xaml::Controls::Border>()) {
+                    void* key = winrt::get_abi(border);
+                    auto [it, inserted] = g_taskbarAppearanceStates.try_emplace(
+                        key, TaskbarAppearanceState{element, nullptr, nullptr, 0.0,
+                                                   element.Opacity(), element.Visibility(), border.BorderThickness(), border.Background(), false});
+                    if (clearTaskbar) {
+                        border.Background(Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
+                    } else {
+                        border.Background(it->second.originalBorderBrush);
                     }
                 }
             } else if (isStroke) {
@@ -296,11 +304,7 @@ static void ApplyTaskbarAppearance(FrameworkElement const& taskbarElement) {
                 }
             }
         }
-
-        root.InvalidateMeasure();
-        root.InvalidateArrange();
-        root.UpdateLayout();
-    } catch (...) {}
+    } catch (const winrt::hresult_error&) {}
 }
 
 static void RestoreTrayVisibility() {
@@ -312,16 +316,7 @@ static void RestoreTrayVisibility() {
                         dep.ClearValue(winrt::Windows::UI::Xaml::UIElement::VisibilityProperty());
                     }
                 }
-                element.InvalidateMeasure();
-                element.InvalidateArrange();
-                if (auto parent = VisualTreeHelper::GetParent(element).try_as<FrameworkElement>()) {
-                    parent.InvalidateMeasure();
-                    parent.InvalidateArrange();
-                    parent.UpdateLayout();
-                } else {
-                    element.UpdateLayout();
-                }
-            } catch (...) {}
+            } catch (const winrt::hresult_error&) {}
         }
     }
     g_trayVisibilityStates.clear();
@@ -445,16 +440,7 @@ static void RestoreDefaultLayout() {
             try {
                 element.ReleasePointerCaptures();
                 element.Margin(state.originalMargin);
-                element.InvalidateMeasure();
-                element.InvalidateArrange();
-                if (auto parent = VisualTreeHelper::GetParent(element).try_as<FrameworkElement>()) {
-                    parent.InvalidateMeasure();
-                    parent.InvalidateArrange();
-                    parent.UpdateLayout();
-                } else {
-                    element.UpdateLayout();
-                }
-            } catch (...) {}
+            } catch (const winrt::hresult_error&) {}
         }
     }
     g_layoutElements.clear();
@@ -519,7 +505,7 @@ static void ApplySavedLayout(FrameworkElement const& root) {
                 SetLayoutOffset(state, state.offsetX + correctionX, state.offsetY + correctionY);
                 SaveLayoutValue(state.id, state.offsetX, state.offsetY);
             }
-        } catch (...) {
+        } catch (const winrt::hresult_error&) {
 
         }
     }
@@ -546,7 +532,7 @@ static FrameworkElement FindLayoutElementAt(FrameworkElement const& root,
                     double area = element.ActualWidth() * element.ActualHeight();
                     if (area < bestArea) { best = element; bestArea = area; }
                 }
-            } catch (...) {}
+            } catch (const winrt::hresult_error&) {}
         }
         int count = VisualTreeHelper::GetChildrenCount(element);
         for (int i = 0; i < count; ++i) {
@@ -784,7 +770,7 @@ static void ApplyTrayItemVisibility(FrameworkElement const& taskbarElement) {
                 }
             }
         }
-    } catch (...) {}
+    } catch (const winrt::hresult_error&) {}
 }
 
 static void HideButtonBackgroundPlate(FrameworkElement const& root) {
@@ -814,7 +800,7 @@ static void HideButtonBackgroundPlate(FrameworkElement const& root) {
             }
             HideButtonBackgroundPlate(child);
         }
-    } catch (...) {}
+    } catch (const winrt::hresult_error&) {}
 }
 
 namespace Lightency {
@@ -1053,7 +1039,7 @@ static void PrepareHighResolutionIconSources(FrameworkElement const& root, doubl
                 }
             }
         }
-    } catch (...) {}
+    } catch (const winrt::hresult_error&) {}
 }
 
 enum class DockElementCategory {
@@ -1137,7 +1123,7 @@ static void UpdateDragDropTargets(void* key, FrameworkElement const& taskbarFram
             if (width > 0 && height > 0) {
                 items.push_back({ { left, top, left + width, top + height }, pt.X });
             }
-        } catch (...) {}
+        } catch (const winrt::hresult_error&) {}
     }
 
     std::sort(items.begin(), items.end(), [](const TargetItem& a, const TargetItem& b) {
@@ -1445,7 +1431,7 @@ static bool RebaseSessionGeometry(Lightency::DockSession& session) {
                 std::abs(item.dimension - previousDim) > 0.5) {
                 layoutChanged = true;
             }
-        } catch (...) {}
+        } catch (const winrt::hresult_error&) {}
     }
 
     if (layoutChanged && session.items.size() > 1) {
@@ -1726,7 +1712,7 @@ static void OnCompositionRenderTick(winrt::Windows::Foundation::IInspectable con
 
         const double easedFade = currentFade * currentFade * (3.0 - 2.0 * currentFade);
         ExecuteDockLayoutFrame(cursorCoord, session, easedFade, dt);
-    } catch (...) {
+    } catch (const winrt::hresult_error&) {
         if (g_isRenderLoopActive.exchange(false)) {
             Media::CompositionTarget::Rendering(g_renderEventToken);
         }
@@ -1759,7 +1745,7 @@ static void HandleSessionPointerMoved(void* key, Input::PointerRoutedEventArgs c
             g_renderEventToken = Media::CompositionTarget::Rendering(OnCompositionRenderTick);
             g_lastMotionTimestamp = std::chrono::steady_clock::now();
         }
-    } catch (...) {}
+    } catch (const winrt::hresult_error&) {}
 }
 
 static void HandleSessionPointerExited(void* key) {
@@ -1768,7 +1754,7 @@ static void HandleSessionPointerExited(void* key) {
             g_isCursorPresent = false;
             g_bounceActive = false;
         }
-    } catch (...) {}
+    } catch (const winrt::hresult_error&) {}
 }
 
 static void InitializeDockSession(void* key, FrameworkElement const& taskbarFrame) {
@@ -1779,7 +1765,7 @@ static void InitializeDockSession(void* key, FrameworkElement const& taskbarFram
         session.windowHandle = ResolveTaskbarWindow();
         UpdateSessionOrientation(session);
         g_dockSessions[key] = std::move(session);
-    } catch (...) {}
+    } catch (const winrt::hresult_error&) {}
 }
 
 static void DockEngine_Cleanup() {
@@ -1800,7 +1786,7 @@ static void DockEngine_Cleanup() {
                             el.LayoutUpdated(s->layoutUpdatedToken);
                         }
                     }
-                } catch (...) {}
+                } catch (const winrt::hresult_error&) {}
             }, &sub);
         }
     }
@@ -1824,7 +1810,7 @@ static void DockEngine_Cleanup() {
         if (g_isRenderLoopActive.exchange(false)) {
             Media::CompositionTarget::Rendering(g_renderEventToken);
         }
-    } catch (...) {}
+    } catch (const winrt::hresult_error&) {}
 
     std::map<HWND, std::vector<winrt::weak_ref<FrameworkElement>>> windowIcons;
     for (auto& [key, session] : g_dockSessions) {
@@ -1845,7 +1831,7 @@ static void DockEngine_Cleanup() {
                         ClearElementTransforms(el);
                     }
                 }
-            } catch (...) {}
+            } catch (const winrt::hresult_error&) {}
         };
         DispatchToTaskbarThread(hwnd, [](PVOID p) {
             auto* fn = static_cast<std::function<void()>*>(p);
@@ -1925,7 +1911,7 @@ static void DockEngine_ApplySettings() {
                         ApplyTrayItemVisibility(frame);
                     }
                 }
-            } catch (...) {}
+            } catch (const winrt::hresult_error&) {}
         };
 
         DispatchToTaskbarThread(hwnd, [](PVOID p) {
@@ -1971,7 +1957,7 @@ void DockAnimation::AttachXamlElement(IUnknown* object) {
                 } else if (taskbar) {
                     HandleSessionPointerExited(key);
                 }
-            } catch (...) {}
+            } catch (const winrt::hresult_error&) {}
         };
         subscription.exited = [key](auto const&, auto const&) {
             HandleSessionPointerExited(key);
@@ -1992,7 +1978,7 @@ void DockAnimation::AttachXamlElement(IUnknown* object) {
                         if (itCtx != g_dockSessions.end() && itCtx->second.windowHandle) h = itCtx->second.windowHandle;
                         UpdateDragDropTargets(key, frame, h);
                     }
-                } catch (...) {}
+                } catch (const winrt::hresult_error&) {}
             };
         } else {
             subscription.layoutUpdated = [weak = winrt::make_weak(element)](auto const&, auto const&) {
@@ -2001,7 +1987,7 @@ void DockAnimation::AttachXamlElement(IUnknown* object) {
                         EnsureLiveConfigMapped();
                         ApplyTrayItemVisibility(frame);
                     }
-                } catch (...) {}
+                } catch (const winrt::hresult_error&) {}
             };
         }
 
@@ -2011,13 +1997,13 @@ void DockAnimation::AttachXamlElement(IUnknown* object) {
             if (subscription.layoutUpdated) {
                 subscription.layoutUpdatedToken = element.LayoutUpdated(subscription.layoutUpdated);
             }
-        } catch (...) {
+        } catch (const winrt::hresult_error&) {
             element.PointerMoved(subscription.movedToken);
             throw;
         }
 
         g_pointerSubscriptions.emplace(key, std::move(subscription));
-    } catch (...) {}
+    } catch (const winrt::hresult_error&) {}
 }
 
 bool DockAnimation::Initialize() {

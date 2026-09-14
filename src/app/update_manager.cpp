@@ -23,8 +23,12 @@
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Data.Json.h>
 
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "windowsapp.lib")
 
 namespace Lightency {
 namespace {
@@ -108,6 +112,7 @@ struct DialogState {
     HWND owner = nullptr;
     bool manual = false;
     HICON hAppIcon = nullptr;
+    std::thread workerThread;
 };
 
 std::string UnescapeJsonString(const std::string& input) {
@@ -416,49 +421,43 @@ bool ReadLatestRelease(std::string& json) {
     return !json.empty();
 }
 
-bool ParseReleaseInfo(const std::string& json, ReleaseInfo& info) {
-    info.tag = ToWide(FindJsonString(json, "tag_name"));
-    info.name = ToWide(FindJsonString(json, "name"));
-    info.body = ExtractChanges(ToWide(FindJsonString(json, "body")));
-    info.htmlUrl = ToWide(FindJsonString(json, "html_url"));
-    if (info.htmlUrl.empty()) info.htmlUrl = L"https://github.com/SashkoTadof/Lightency/releases/latest";
-    if (info.name.empty()) info.name = L"Lightency " + info.tag;
+bool ParseReleaseInfo(const std::string& jsonString, ReleaseInfo& info) {
+    try {
+        winrt::hstring wjson = winrt::to_hstring(jsonString);
+        winrt::Windows::Data::Json::JsonObject root = winrt::Windows::Data::Json::JsonObject::Parse(wjson);
 
-    size_t assetsPos = json.find("\"assets\"");
-    if (assetsPos != std::string::npos) {
-        size_t openBracket = json.find('[', assetsPos);
-        size_t closeBracket = json.find(']', assetsPos);
-        if (openBracket != std::string::npos && closeBracket != std::string::npos) {
-            size_t cur = openBracket;
-            while (cur < closeBracket) {
-                size_t objStart = json.find('{', cur);
-                if (objStart == std::string::npos || objStart >= closeBracket) break;
-                int depth = 0;
-                size_t objEnd = std::string::npos;
-                for (size_t i = objStart; i < json.size(); ++i) {
-                    if (json[i] == '{') ++depth;
-                    else if (json[i] == '}') {
-                        --depth;
-                        if (depth == 0) {
-                            objEnd = i;
-                            break;
+        if (root.HasKey(L"tag_name")) info.tag = root.GetNamedString(L"tag_name").c_str();
+        if (root.HasKey(L"name")) info.name = root.GetNamedString(L"name").c_str();
+        if (root.HasKey(L"body")) info.body = ExtractChanges(std::wstring(root.GetNamedString(L"body").c_str()));
+        if (root.HasKey(L"html_url")) info.htmlUrl = root.GetNamedString(L"html_url").c_str();
+        
+        if (info.htmlUrl.empty()) info.htmlUrl = L"https://github.com/SashkoTadof/Lightency/releases/latest";
+        if (info.name.empty()) info.name = L"Lightency " + info.tag;
+
+        if (root.HasKey(L"assets")) {
+            auto assets = root.GetNamedArray(L"assets");
+            for (uint32_t i = 0; i < assets.Size(); ++i) {
+                auto asset = assets.GetObjectAt(i);
+                if (asset.HasKey(L"name") && asset.HasKey(L"browser_download_url")) {
+                    std::wstring name = asset.GetNamedString(L"name").c_str();
+                    std::wstring url = asset.GetNamedString(L"browser_download_url").c_str();
+                    
+                    if (name.find(L"Lightency") != std::wstring::npos &&
+                        name.find(L"symbols") == std::wstring::npos &&
+                        name.find(L"source") == std::wstring::npos &&
+                        name.size() >= 4 && name.substr(name.size() - 4) == L".zip") {
+                        
+                        info.zipUrl = url;
+                        if (asset.HasKey(L"size")) {
+                            info.zipSize = static_cast<uint64_t>(asset.GetNamedNumber(L"size"));
                         }
+                        break;
                     }
                 }
-                if (objEnd == std::string::npos) break;
-                std::string chunk = json.substr(objStart, objEnd - objStart + 1);
-
-                std::string url = FindJsonString(chunk, "browser_download_url");
-                std::string name = FindJsonString(chunk, "name");
-                uint64_t sz = FindJsonInt(chunk, "size");
-                if (name.size() >= 4 && name.substr(name.size() - 4) == ".zip") {
-                    info.zipUrl = ToWide(url);
-                    info.zipSize = sz;
-                    break;
-                }
-                cur = objEnd + 1;
             }
         }
+    } catch (const winrt::hresult_error&) {
+        return false;
     }
     info.isNewer = IsNewer(info.tag);
     return !info.tag.empty();
@@ -496,12 +495,18 @@ void MarkChecked() {
 std::wstring GetTempUpdateDir() {
     wchar_t tempPath[MAX_PATH];
     GetTempPathW(MAX_PATH, tempPath);
-    std::wstring dir = std::wstring(tempPath) + L"LightencyUpdate_" + std::to_wstring(GetCurrentProcessId());
+    
+    GUID guid;
+    CoCreateGuid(&guid);
+    wchar_t guidStr[40];
+    StringFromGUID2(guid, guidStr, 40);
+
+    std::wstring dir = std::wstring(tempPath) + L"LightencyUpdate_" + guidStr;
     CreateDirectoryW(dir.c_str(), nullptr);
     return dir;
 }
 
-bool DownloadFile(const std::wstring& url, const std::wstring& destPath,
+bool DownloadFile(const std::wstring& url, const std::wstring& destPath, uint64_t expectedSize,
                   std::function<void(uint64_t downloaded, uint64_t total)> progressCallback,
                   std::atomic<bool>& cancelFlag) {
     URL_COMPONENTS urlComp{};
@@ -514,6 +519,7 @@ bool DownloadFile(const std::wstring& url, const std::wstring& destPath,
     urlComp.dwUrlPathLength = ARRAYSIZE(urlPath);
 
     if (!WinHttpCrackUrl(url.c_str(), 0, 0, &urlComp)) return false;
+    if (urlComp.nScheme != INTERNET_SCHEME_HTTPS) return false;
 
     InternetHandle session{ WinHttpOpen(L"Lightency-Downloader/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0) };
@@ -523,7 +529,7 @@ bool DownloadFile(const std::wstring& url, const std::wstring& destPath,
     InternetHandle connection{ WinHttpConnect(session.value, hostName, urlComp.nPort, 0) };
     if (!connection.value) return false;
 
-    DWORD flags = (urlComp.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
+    DWORD flags = WINHTTP_FLAG_SECURE;
     InternetHandle request{ WinHttpOpenRequest(connection.value, L"GET", urlPath, nullptr,
         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags) };
     if (!request.value) return false;
@@ -540,10 +546,10 @@ bool DownloadFile(const std::wstring& url, const std::wstring& destPath,
                              nullptr, &status, &statusSize, nullptr) || status != 200) return false;
 
     DWORD contentLength = 0, clSize = sizeof(contentLength);
-    uint64_t totalBytes = 0;
+    uint64_t totalBytes = expectedSize;
     if (WinHttpQueryHeaders(request.value, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
                             nullptr, &contentLength, &clSize, nullptr)) {
-        totalBytes = contentLength;
+        if (totalBytes == 0) totalBytes = contentLength;
     }
 
     HANDLE hFile = CreateFileW(destPath.c_str(), GENERIC_WRITE, 0, nullptr,
@@ -575,6 +581,10 @@ bool DownloadFile(const std::wstring& url, const std::wstring& destPath,
     }
 
     CloseHandle(hFile);
+    
+    if (success && !cancelFlag && expectedSize > 0) {
+        if (downloaded != expectedSize) success = false;
+    }
 
     if (cancelFlag || !success) {
         DeleteFileW(destPath.c_str());
@@ -613,7 +623,9 @@ bool ExecuteUpdatePayload(const std::wstring& zipPath, std::wstring& errorMsg) {
     std::wstring extractDir = tempDir + L"\\extracted";
     CreateDirectoryW(extractDir.c_str(), nullptr);
 
-    std::wstring tarCmd = L"tar.exe -xf \"" + zipPath + L"\" -C \"" + extractDir + L"\"";
+    wchar_t sysDir[MAX_PATH]{};
+    GetSystemDirectoryW(sysDir, MAX_PATH);
+    std::wstring tarCmd = std::wstring(sysDir) + L"\\tar.exe -xf \"" + zipPath + L"\" -C \"" + extractDir + L"\"";
     STARTUPINFOW siTar{ sizeof(siTar) };
     PROCESS_INFORMATION piTar{};
     siTar.dwFlags = STARTF_USESHOWWINDOW;
@@ -653,71 +665,72 @@ bool ExecuteUpdatePayload(const std::wstring& zipPath, std::wstring& errorMsg) {
         return false;
     }
 
-    wchar_t tempPath[MAX_PATH]{};
-    GetTempPathW(MAX_PATH, tempPath);
-    std::wstring batchPath = std::wstring(tempPath) + L"lightency_apply_update_" + std::to_wstring(GetCurrentProcessId()) + L".bat";
-    HANDLE hBatch = CreateFileW(batchPath.c_str(), GENERIC_WRITE, 0, nullptr,
-                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hBatch == INVALID_HANDLE_VALUE) {
-        errorMsg = L"Could not create updater script.";
+    std::wstring exeOld = targetDir + L"\\lightency.exe.old";
+    std::wstring dllOld = targetDir + L"\\lightency_hook.dll.old";
+    
+    // Kill StartMenuExperienceHost to force it to restart with the new DLL unloaded.
+    STARTUPINFOW siKill{ sizeof(siKill) };
+    PROCESS_INFORMATION piKill{};
+    siKill.dwFlags = STARTF_USESHOWWINDOW;
+    siKill.wShowWindow = SW_HIDE;
+    std::wstring killCmd = std::wstring(sysDir) + L"\\taskkill.exe /F /IM StartMenuExperienceHost.exe";
+    std::vector<wchar_t> killBuf(killCmd.begin(), killCmd.end());
+    killBuf.push_back(L'\0');
+    if (CreateProcessW(nullptr, killBuf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &siKill, &piKill)) {
+        WaitForSingleObject(piKill.hProcess, 3000);
+        CloseHandle(piKill.hProcess);
+        CloseHandle(piKill.hThread);
+    }
+
+    // Delete any existing .old files first
+    DeleteFileW(exeOld.c_str());
+    DeleteFileW(dllOld.c_str());
+
+    // Rename current files
+    MoveFileW((targetDir + L"\\lightency.exe").c_str(), exeOld.c_str());
+    MoveFileW((targetDir + L"\\lightency_hook.dll").c_str(), dllOld.c_str());
+
+    // Copy new executables natively to ensure atomicity
+    if (!CopyFileW((sourceDir + L"\\lightency.exe").c_str(), (targetDir + L"\\lightency.exe").c_str(), FALSE)) {
+        // Rollback
+        DeleteFileW((targetDir + L"\\lightency.exe").c_str());
+        MoveFileW(exeOld.c_str(), (targetDir + L"\\lightency.exe").c_str());
+        MoveFileW(dllOld.c_str(), (targetDir + L"\\lightency_hook.dll").c_str());
+        errorMsg = L"Failed to overwrite lightency.exe.";
         return false;
     }
 
-    std::string script =
-        "@echo off\r\n"
-        "chcp 65001 >nul\r\n"
-        "setlocal\r\n"
-        "set \"TARGET_DIR=" + ToUtf8(targetDir) + "\"\r\n"
-        "set \"SOURCE_DIR=" + ToUtf8(sourceDir) + "\"\r\n"
-        "set \"TEMP_DIR=" + ToUtf8(tempDir) + "\"\r\n"
-        "set \"PID=" + std::to_string(GetCurrentProcessId()) + "\"\r\n"
-        ":wait_pid\r\n"
-        "tasklist /fi \"PID eq %PID%\" 2>nul | findstr /i \"%PID%\" >nul\r\n"
-        "if not errorlevel 1 (\r\n"
-        "    timeout /t 1 /nobreak >nul\r\n"
-        "    goto wait_pid\r\n"
-        ")\r\n"
-        "timeout /t 1 /nobreak >nul\r\n"
-        "del /f /q \"%TARGET_DIR%\\*.old.*\" 2>nul\r\n"
-        "if exist \"%TARGET_DIR%\\lightency.exe\" move /y \"%TARGET_DIR%\\lightency.exe\" \"%TARGET_DIR%\\lightency.exe.old.%RANDOM%\" >nul 2>nul\r\n"
-        "if exist \"%TARGET_DIR%\\lightency_hook.dll\" move /y \"%TARGET_DIR%\\lightency_hook.dll\" \"%TARGET_DIR%\\lightency_hook.dll.old.%RANDOM%\" >nul 2>nul\r\n"
-        "set /a attempts=0\r\n"
-        ":copy_loop\r\n"
-        "set /a attempts+=1\r\n"
-        "copy /y \"%SOURCE_DIR%\\lightency.exe\" \"%TARGET_DIR%\\lightency.exe\" >nul 2>nul\r\n"
-        "if errorlevel 1 (\r\n"
-        "    if %attempts% lss 10 (\r\n"
-        "        timeout /t 1 /nobreak >nul\r\n"
-        "        if exist \"%TARGET_DIR%\\lightency.exe\" move /y \"%TARGET_DIR%\\lightency.exe\" \"%TARGET_DIR%\\lightency.exe.old.%RANDOM%\" >nul 2>nul\r\n"
-        "        goto copy_loop\r\n"
-        "    )\r\n"
-        ")\r\n"
-        "copy /y \"%SOURCE_DIR%\\lightency_hook.dll\" \"%TARGET_DIR%\\lightency_hook.dll\" >nul 2>nul\r\n"
-        "if exist \"%SOURCE_DIR%\\LICENSE.txt\" copy /y \"%SOURCE_DIR%\\LICENSE.txt\" \"%TARGET_DIR%\\LICENSE.txt\" >nul 2>nul\r\n"
-        "xcopy /y /e /i /q \"%SOURCE_DIR%\\*\" \"%TARGET_DIR%\\\" >nul 2>nul\r\n"
-        "rd /s /q \"%TEMP_DIR%\" 2>nul\r\n"
-        "start \"\" \"%TARGET_DIR%\\lightency.exe\"\r\n"
-        "(goto) 2>nul & del \"%~f0\" >nul 2>nul\r\n";
+    CopyFileW((sourceDir + L"\\lightency_hook.dll").c_str(), (targetDir + L"\\lightency_hook.dll").c_str(), FALSE);
 
-    DWORD written = 0;
-    WriteFile(hBatch, script.data(), static_cast<DWORD>(script.size()), &written, nullptr);
-    CloseHandle(hBatch);
+    // Xcopy the rest
+    wchar_t sysDir2[MAX_PATH]{};
+    GetSystemDirectoryW(sysDir2, MAX_PATH);
+    std::wstring xcopyCmd = std::wstring(sysDir2) + L"\\cmd.exe /c xcopy /y /e /i /q \"" + sourceDir + L"\\*\" \"" + targetDir + L"\\\"";
+    STARTUPINFOW siXcopy{ sizeof(siXcopy) };
+    PROCESS_INFORMATION piXcopy{};
+    siXcopy.dwFlags = STARTF_USESHOWWINDOW;
+    siXcopy.wShowWindow = SW_HIDE;
+    std::vector<wchar_t> xcopyBuf(xcopyCmd.begin(), xcopyCmd.end());
+    xcopyBuf.push_back(L'\0');
+    if (CreateProcessW(nullptr, xcopyBuf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &siXcopy, &piXcopy)) {
+        WaitForSingleObject(piXcopy.hProcess, 10000);
+        CloseHandle(piXcopy.hProcess);
+        CloseHandle(piXcopy.hThread);
+    }
 
-    STARTUPINFOW siBatch{ sizeof(siBatch) };
-    PROCESS_INFORMATION piBatch{};
-    siBatch.dwFlags = STARTF_USESHOWWINDOW;
-    siBatch.wShowWindow = SW_HIDE;
-
-    std::wstring batchCmd = L"cmd.exe /c \"" + batchPath + L"\"";
-    std::vector<wchar_t> batchBuf(batchCmd.begin(), batchCmd.end());
-    batchBuf.push_back(L'\0');
-
-    if (!CreateProcessW(nullptr, batchBuf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &siBatch, &piBatch)) {
-        errorMsg = L"Failed to start updater helper process.";
+    // Launch new process
+    std::wstring launchCmd = L"\"" + targetDir + L"\\lightency.exe\" --cleanup-update \"" + tempDir + L"\"";
+    STARTUPINFOW siLaunch{ sizeof(siLaunch) };
+    PROCESS_INFORMATION piLaunch{};
+    std::vector<wchar_t> launchBuf(launchCmd.begin(), launchCmd.end());
+    launchBuf.push_back(L'\0');
+    if (!CreateProcessW(nullptr, launchBuf.data(), nullptr, nullptr, FALSE, 0, nullptr, targetDir.c_str(), &siLaunch, &piLaunch)) {
+        errorMsg = L"Failed to start updated Lightency.";
         return false;
     }
-    CloseHandle(piBatch.hProcess);
-    CloseHandle(piBatch.hThread);
+    CloseHandle(piLaunch.hProcess);
+    CloseHandle(piLaunch.hThread);
+
 
     ApplyNormalToAllTaskbars();
     Injector::Shutdown();
@@ -1099,11 +1112,15 @@ void StartDownloadWorker(DialogState* state) {
     state->cancelRequested = false;
     InvalidateRect(state->hwnd, nullptr, FALSE);
 
-    std::thread([state]() {
+    if (state->workerThread.joinable()) {
+        state->workerThread.join();
+    }
+
+    state->workerThread = std::thread([state]() {
         std::wstring tempDir = GetTempUpdateDir();
         std::wstring destZip = tempDir + L"\\update.zip";
 
-        bool ok = DownloadFile(state->info.zipUrl, destZip,
+        bool ok = DownloadFile(state->info.zipUrl, destZip, state->info.zipSize,
             [state](uint64_t down, uint64_t total) {
                 state->downloadedBytes = down;
                 state->totalBytes = total;
@@ -1136,7 +1153,7 @@ void StartDownloadWorker(DialogState* state) {
             state->mode = DialogMode::Error;
             PostMessageW(state->hwnd, WM_UPDATE_FAILED, 0, 0);
         }
-    }).detach();
+    });
 }
 
 LRESULT CALLBACK UpdateWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1455,6 +1472,11 @@ void ShowUpdateDialog(HWND owner, const ReleaseInfo& info, bool manual) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+
+    if (state.workerThread.joinable()) {
+        state.cancelRequested = true;
+        state.workerThread.join();
+    }
 }
 
 void PerformCheck(HWND owner, bool manual) {
@@ -1492,12 +1514,18 @@ void PerformCheck(HWND owner, bool manual) {
 
 }
 
+static std::thread g_checkThread;
+
 void UpdateManager::Start(HWND owner) {
-    std::thread([owner]() { PerformCheck(owner, false); }).detach();
+    if (g_checkRunning.load(std::memory_order_acquire)) return;
+    if (g_checkThread.joinable()) g_checkThread.join();
+    g_checkThread = std::thread([owner]() { PerformCheck(owner, false); });
 }
 
 void UpdateManager::CheckNow(HWND owner) {
-    std::thread([owner]() { PerformCheck(owner, true); }).detach();
+    if (g_checkRunning.load(std::memory_order_acquire)) return;
+    if (g_checkThread.joinable()) g_checkThread.join();
+    g_checkThread = std::thread([owner]() { PerformCheck(owner, true); });
 }
 
 }

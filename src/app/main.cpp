@@ -16,6 +16,7 @@
 #define IDT_TASKBAR_RETRY_1 6001
 #define IDT_TASKBAR_RETRY_2 6002
 #define IDT_TASKBAR_RETRY_3 6003
+#define IDT_TASKBAR_RETRY_4 6004
 #define WM_LIGHTENCY_APPLY_SETTINGS (WM_USER + 201)
 #define WM_LIGHTENCY_OPEN_UI        (WM_USER + 202)
 #define WM_LIGHTENCY_CHECK_UPDATES  (WM_USER + 203)
@@ -63,8 +64,9 @@ static void ApplyAllSettings() {
 }
 
 static void OnConfigChangedCallback() {
-    ApplyAllSettings();
-    ConfigManager::Save(g_Config);
+    if (g_hMainWnd) {
+        PostMessageW(g_hMainWnd, WM_LIGHTENCY_APPLY_SETTINGS, 0, 0);
+    }
 }
 
 static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -79,6 +81,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
     }
     if (uMsg == WM_LIGHTENCY_APPLY_SETTINGS) {
         LogDebug("MainWndProc: WM_LIGHTENCY_APPLY_SETTINGS received");
+        ConfigManager::Save(g_Config);
         ApplyAllSettings();
         SetTimer(hWnd, IDT_TASKBAR_RETRY_1, 100, nullptr);
         SetTimer(hWnd, IDT_TASKBAR_RETRY_2, 350, nullptr);
@@ -116,7 +119,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
             }
             return 0;
         }
-        if (wParam >= IDT_TASKBAR_RETRY_1 && wParam <= IDT_TASKBAR_RETRY_3) {
+        if (wParam >= IDT_TASKBAR_RETRY_1 && wParam <= IDT_TASKBAR_RETRY_4) {
             KillTimer(hWnd, wParam);
             LogDebug("MainWndProc: retry timer fired: " + std::to_string(wParam));
             Injector::Update(g_Config);
@@ -202,23 +205,70 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
     DisableProcessWindowsGhosting();
     EnableDarkMode();
 
-    bool bQuit = (pCmdLine && (wcsstr(pCmdLine, L"--quit") || wcsstr(pCmdLine, L"-q")));
-    bool bDaemon = (pCmdLine && (wcsstr(pCmdLine, L"--daemon") || wcsstr(pCmdLine, L"-d")));
-    bool bCheckUpdates = (pCmdLine && (wcsstr(pCmdLine, L"--check-updates") || wcsstr(pCmdLine, L"-u")));
+    bool bQuit = false;
+    bool bDaemon = false;
+    bool bCheckUpdates = false;
+    std::wstring cleanupDir;
 
-    HWND hExisting = FindWindowW(WINDOW_CLASS_NAME, nullptr);
-    if (hExisting) {
-        if (bQuit) {
-            LogDebug("wWinMain: existing instance found, sending IDM_EXIT");
-            PostMessageW(hExisting, WM_COMMAND, IDM_EXIT, 0);
-            return 0;
+    int argc = 0;
+    if (LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc)) {
+        for (int i = 1; i < argc; ++i) {
+            std::wstring arg = argv[i];
+            if (arg == L"--quit" || arg == L"-q") bQuit = true;
+            else if (arg == L"--daemon" || arg == L"-d") bDaemon = true;
+            else if (arg == L"--check-updates" || arg == L"-u") bCheckUpdates = true;
+            else if (arg == L"--cleanup-update" && i + 1 < argc) {
+                cleanupDir = argv[++i];
+            }
         }
-        if (bCheckUpdates) {
-            PostMessageW(hExisting, WM_LIGHTENCY_CHECK_UPDATES, 0, 0);
-            return 0;
+        LocalFree(argv);
+    }
+
+    if (!cleanupDir.empty()) {
+        Sleep(1500); // Wait for the old process to exit
+        
+        wchar_t currentExePath[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, currentExePath, MAX_PATH);
+        std::wstring currentExe(currentExePath);
+        size_t lastSlash = currentExe.find_last_of(L"\\/");
+        if (lastSlash != std::wstring::npos) {
+            std::wstring targetDir = currentExe.substr(0, lastSlash);
+            WIN32_FIND_DATAW fd;
+            HANDLE hFind = FindFirstFileW((targetDir + L"\\*.old*").c_str(), &fd);
+            if (hFind != INVALID_HANDLE_VALUE) {
+                do {
+                    DeleteFileW((targetDir + L"\\" + fd.cFileName).c_str());
+                } while (FindNextFileW(hFind, &fd));
+                FindClose(hFind);
+            }
         }
-        LogDebug("wWinMain: existing instance found, posting WM_LIGHTENCY_OPEN_UI");
-        PostMessageW(hExisting, WM_LIGHTENCY_OPEN_UI, 0, 0);
+
+        if (cleanupDir.size() > 5 && cleanupDir.find(L"LightencyUpdate_") != std::wstring::npos) {
+            SHFILEOPSTRUCTW fileOp{};
+            std::wstring doubleNullPath = cleanupDir + L'\0';
+            fileOp.wFunc = FO_DELETE;
+            fileOp.pFrom = doubleNullPath.c_str();
+            fileOp.fFlags = FOF_NO_UI | FOF_NOCONFIRMATION | FOF_SILENT;
+            SHFileOperationW(&fileOp);
+        }
+    }
+
+    HANDLE hMutex = CreateMutexW(nullptr, TRUE, L"Lightency_SingleInstance_Mutex");
+    bool alreadyRunning = (GetLastError() == ERROR_ALREADY_EXISTS);
+    if (!hMutex) return 1;
+
+    if (alreadyRunning) {
+        HWND hExisting = FindWindowW(WINDOW_CLASS_NAME, nullptr);
+        if (hExisting) {
+            if (bQuit) {
+                PostMessageW(hExisting, WM_COMMAND, IDM_EXIT, 0);
+            } else if (bCheckUpdates) {
+                PostMessageW(hExisting, WM_LIGHTENCY_CHECK_UPDATES, 0, 0);
+            } else {
+                PostMessageW(hExisting, WM_LIGHTENCY_OPEN_UI, 0, 0);
+            }
+        }
+        CloseHandle(hMutex);
         return 0;
     }
     if (bQuit) {
@@ -260,6 +310,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
     LogDebug("wWinMain: g_hMainWnd=" + std::to_string((unsigned long long)g_hMainWnd));
 
     ApplyAllSettings();
+    if (g_hMainWnd) {
+        SetTimer(g_hMainWnd, IDT_TASKBAR_RETRY_1, 100, nullptr);
+        SetTimer(g_hMainWnd, IDT_TASKBAR_RETRY_2, 350, nullptr);
+        SetTimer(g_hMainWnd, IDT_TASKBAR_RETRY_3, 900, nullptr);
+        SetTimer(g_hMainWnd, IDT_TASKBAR_RETRY_4, 2500, nullptr);
+    }
 
     if (bCheckUpdates) {
         UpdateManager::CheckNow(g_hMainWnd);

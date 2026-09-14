@@ -1,7 +1,7 @@
 #include "border_manager.h"
 #include <dwmapi.h>
 #include <atomic>
-#include <unordered_set>
+#include <unordered_map>
 #include <mutex>
 #include <string>
 
@@ -17,7 +17,7 @@ HWINEVENTHOOK g_hookForeground = nullptr;
 HWINEVENTHOOK g_hookShow = nullptr;
 HWINEVENTHOOK g_hookDestroy = nullptr;
 std::mutex g_windowsMutex;
-std::unordered_set<HWND> g_processedWindows;
+static std::unordered_map<HWND, COLORREF> g_originalColors;
 
 bool IsEligibleWindow(HWND window) {
     if (!window || !IsWindow(window)) {
@@ -79,21 +79,34 @@ bool IsEligibleWindow(HWND window) {
 }
 
 void SetWindowBorder(HWND window, bool remove) {
-    const COLORREF color = remove ? kColorInvisible : kColorDefault;
-    DwmSetWindowAttribute(window, kDwmBorderAttribute, &color, sizeof(color));
+    if (remove) {
+        COLORREF currentColor = kColorDefault;
+        if (SUCCEEDED(DwmGetWindowAttribute(window, kDwmBorderAttribute, &currentColor, sizeof(currentColor)))) {
+            if (currentColor != kColorInvisible) {
+                g_originalColors[window] = currentColor;
+            }
+        } else {
+            g_originalColors[window] = kColorDefault;
+        }
+        COLORREF color = kColorInvisible;
+        DwmSetWindowAttribute(window, kDwmBorderAttribute, &color, sizeof(color));
+    } else {
+        COLORREF color = kColorDefault;
+        auto it = g_originalColors.find(window);
+        if (it != g_originalColors.end()) {
+            color = it->second;
+            g_originalColors.erase(it);
+        }
+        DwmSetWindowAttribute(window, kDwmBorderAttribute, &color, sizeof(color));
+    }
 }
 
 void ApplyToAllWindows(bool remove) {
     EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
         const bool removeBorder = (lParam != 0);
         if (IsEligibleWindow(hwnd)) {
-            SetWindowBorder(hwnd, removeBorder);
             std::lock_guard lock(g_windowsMutex);
-            if (removeBorder) {
-                g_processedWindows.insert(hwnd);
-            } else {
-                g_processedWindows.erase(hwnd);
-            }
+            SetWindowBorder(hwnd, removeBorder);
         }
         return TRUE;
     }, remove ? 1 : 0);
@@ -110,21 +123,20 @@ void CALLBACK OnWindowEvent(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject
 
     if (event == EVENT_OBJECT_DESTROY) {
         std::lock_guard lock(g_windowsMutex);
-        g_processedWindows.erase(hwnd);
+        g_originalColors.erase(hwnd);
         return;
     }
 
     {
         std::lock_guard lock(g_windowsMutex);
-        if (g_processedWindows.contains(hwnd)) {
+        if (g_originalColors.contains(hwnd)) {
             return;
         }
     }
 
     if (IsEligibleWindow(hwnd)) {
-        SetWindowBorder(hwnd, true);
         std::lock_guard lock(g_windowsMutex);
-        g_processedWindows.insert(hwnd);
+        SetWindowBorder(hwnd, true);
     }
 }
 
@@ -167,18 +179,9 @@ void Update(const AppConfig& config) {
             UnhookWinEvent(g_hookDestroy);
             g_hookDestroy = nullptr;
         }
-        std::unordered_set<HWND> toRestore;
-        {
-            std::lock_guard lock(g_windowsMutex);
-            toRestore = std::move(g_processedWindows);
-            g_processedWindows.clear();
-        }
-        for (HWND hwnd : toRestore) {
-            if (IsWindow(hwnd)) {
-                SetWindowBorder(hwnd, false);
-            }
-        }
         ApplyToAllWindows(false);
+        std::lock_guard lock(g_windowsMutex);
+        g_originalColors.clear();
     }
 }
 
