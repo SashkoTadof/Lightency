@@ -1,11 +1,27 @@
 cmake_minimum_required(VERSION 3.20)
-project(lightency VERSION 1.1.1 LANGUAGES C CXX)
+
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" LIGHTENCY_RAW_VERSION)
+    string(STRIP "${LIGHTENCY_RAW_VERSION}" LIGHTENCY_BUILD_VERSION)
+else()
+    set(LIGHTENCY_BUILD_VERSION "1.1.1")
+endif()
+
+project(lightency VERSION ${LIGHTENCY_BUILD_VERSION} LANGUAGES C CXX)
+
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
+
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/common/version.h.in"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/common/version.h"
+    @ONLY
+)
+
 option(LIGHTENCY_DIAGNOSTICS "Enable runtime diagnostic logs" OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-
 if (MSVC)
     add_compile_options(/W4 /Zc:strictStrings- /permissive- /utf-8 /bigobj /EHsc)
     add_compile_definitions(UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

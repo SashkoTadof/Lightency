@@ -13,7 +13,11 @@ if %errorlevel% neq 0 (
 )
 
 set "VERSION=1.1.1"
-for /f "tokens=3" %%v in ('findstr /i "project.*VERSION" CMakeLists.txt') do set "VERSION=%%v"
+if exist "VERSION" (
+    set /p VERSION=<VERSION
+) else (
+    for /f "tokens=3" %%v in ('findstr /i "project.*VERSION" CMakeLists.txt') do set "VERSION=%%v"
+)
 
 set "BUILD_DIR=.build"
 set "RELEASE_DIR=build\lightency-release"

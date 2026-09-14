@@ -1,8 +1,9 @@
 #include <windows.h>
+#include "../common/version.h"
 
 1 VERSIONINFO
- FILEVERSION 1,1,0,0
- PRODUCTVERSION 1,1,0,0
+ FILEVERSION LIGHTENCY_RC_VERSION
+ PRODUCTVERSION LIGHTENCY_RC_VERSION
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS VS_FF_DEBUG
@@ -19,11 +20,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "SashkoTadof"
             VALUE "FileDescription", "Lightency Explorer taskbar extension"
-            VALUE "FileVersion", "1.1.1"
+            VALUE "FileVersion", LIGHTENCY_VERSION_STR
             VALUE "InternalName", "lightency_hook"
             VALUE "OriginalFilename", "lightency_hook.dll"
             VALUE "ProductName", "Lightency"
-            VALUE "ProductVersion", "1.1.1"
+            VALUE "ProductVersion", LIGHTENCY_VERSION_STR
             VALUE "LegalCopyright", "Copyright (C) 2026 Lightency contributors"
         END
     END
