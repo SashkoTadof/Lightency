@@ -4,21 +4,29 @@ Windows 11 taskbar and start menu customization in native C++20.
 
 ![Lightency settings](assets/screenshots/main.png)
 
-## Showcase
-
-| Dock Animation | Start Button & Menu | Window Animations |
-| :---: | :---: | :---: |
-| ![Dock animation](assets/screenshots/dock-animation.png) | ![Start button and menu](assets/screenshots/start-menu.png) | ![Window animation](assets/screenshots/window-animation.png) |
-
 ## Features
 
-- **macOS-style Dock**: smooth icon scaling with wave expansion, physics-based bounce, and auto-centering.
+### macOS-Style Dock Animations
+Smooth icon scaling on hover with wave expansion, physics bounce, and auto-alignment.
+
+![Dock animation](assets/screenshots/dock-animation.png)
+
+### Minimal Start Menu & Custom Styling
+Customize the Start button icon, match Windows accent colors, and strip clutter (search bar, recommended feed, pinned sections).
+
+![Start button and menu](assets/screenshots/start-menu.png)
+
+### Dynamic Window Animations & Borders
+Subtle macOS-inspired minimize animations and custom window border styling.
+
+![Window animation](assets/screenshots/window-animation.png)
+
+---
+
+### More Highlights
 - **Transparent Taskbar**: clear acrylic/solid background with top border removal, fully working on Windows 11 24H2.
-- **Start Button Styling**: custom icon colors, Windows accent color matching, custom sizing, and alignment offsets.
-- **Minimal Start Menu**: declutter the Start menu by toggling search, pinned apps, recommended feed, and user badges.
-- **Smart Drag & Drop**: drag any file over a taskbar icon to bring its window to the front without clicking.
-- **Clean System Tray**: hide noisy icons individually (clock, network, volume, battery, chevron).
-- **Window Animations & Borders**: lightweight window minimize effects and accurate window border styling.
+- **Smart Drag & Drop**: hover files over any taskbar icon to bring target windows into focus instantly.
+- **System Tray Cleaner**: hide clutter items individually (clock, network, sound, battery, overflow chevron).
 - **Zero Bloat**: single portable executable written in pure C++20, zero background services, zero telemetry.
 
 ## Architecture
