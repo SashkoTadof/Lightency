@@ -3693,10 +3693,20 @@ bool DockAnimation::Initialize() {
 
 void DockAnimation::Shutdown() {
     LogDock(L"DockAnimation::Shutdown");
-    Lightency::DragDropAssist::Shutdown();
-    StartButtonStyle::Shutdown();
-    XamlBridge::Shutdown();
-    Wh_ModBeforeUninit();
+    HWND hWnd = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (hWnd) {
+        RunFromWindowThread(hWnd, [](PVOID) {
+            Lightency::DragDropAssist::Shutdown();
+            StartButtonStyle::Shutdown();
+            XamlBridge::Shutdown();
+            Wh_ModBeforeUninit();
+        }, nullptr);
+    } else {
+        Lightency::DragDropAssist::Shutdown();
+        StartButtonStyle::Shutdown();
+        XamlBridge::Shutdown();
+        Wh_ModBeforeUninit();
+    }
 }
 
 void DockAnimation::UpdateSettings(const SharedHookConfig& config) {

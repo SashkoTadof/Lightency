@@ -38,10 +38,13 @@ static bool IsOwnerProcessAlive(DWORD pid) {
     return alive;
 }
 
-static void StartExtensionWorker() {
-    if (g_workerRunning.exchange(true, std::memory_order_acq_rel)) return;
+static void StartExtensionWorker(HMODULE hModule) {
+    if (g_workerRunning.exchange(true, std::memory_order_acq_rel)) {
+        if (hModule) FreeLibrary(hModule);
+        return;
+    }
 
-    std::thread([]() {
+    std::thread([hModule]() {
         WriteDiagnostic("explorer", "Extension worker started");
         const bool ready = Lightency::DockAnimation::Initialize();
         g_hookReady.store(ready, std::memory_order_release);
@@ -49,6 +52,7 @@ static void StartExtensionWorker() {
 
         if (!ready) {
             g_workerRunning.store(false, std::memory_order_release);
+            if (hModule) FreeLibraryAndExitThread(hModule, 0);
             return;
         }
 
@@ -75,6 +79,7 @@ static void StartExtensionWorker() {
         if (mapping) CloseHandle(mapping);
         g_workerRunning.store(false, std::memory_order_release);
         WriteDiagnostic("explorer", "Extension worker stopped");
+        if (hModule) FreeLibraryAndExitThread(hModule, 0);
     }).detach();
 }
 
@@ -92,7 +97,9 @@ extern "C" __declspec(dllexport) LRESULT CALLBACK LightencyHookProc(
             if (g_hookReady.load(std::memory_order_acquire)) {
                 Lightency::DockAnimation::RefreshSettings();
             } else {
-                StartExtensionWorker();
+                HMODULE hSelf = nullptr;
+                GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(StartExtensionWorker), &hSelf);
+                StartExtensionWorker(hSelf);
             }
         }
     }
@@ -140,7 +147,11 @@ extern "C" __declspec(dllexport) LRESULT CALLBACK LightencyCbtProc(
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
-        if (IsExplorerProcess()) StartExtensionWorker();
+        if (IsExplorerProcess()) {
+            HMODULE hSelf = nullptr;
+            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(StartExtensionWorker), &hSelf);
+            StartExtensionWorker(hSelf);
+        }
     }
     return TRUE;
 }
