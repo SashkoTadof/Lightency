@@ -4,16 +4,22 @@ Windows 11 taskbar and start menu customization in native C++20.
 
 ![Lightency settings](assets/screenshots/main.png)
 
+## Showcase
+
+| Dock Animation | Start Button & Menu | Window Animations |
+| :---: | :---: | :---: |
+| ![Dock animation](assets/screenshots/dock-animation.png) | ![Start button and menu](assets/screenshots/start-menu.png) | ![Window animation](assets/screenshots/window-animation.png) |
+
 ## Features
 
-- **Dock animation**: icon scaling on mouse hover with macOS-style wave expansion and bounce.
-- **Transparent taskbar**: clear taskbar background and remove top border line (compatible with modern Windows 11 builds).
-- **Start button styling**: custom icon color, accent color matching, size, and position offset.
-- **Start menu cleanup**: toggle visibility of search box, pinned items, recommended section, user profile, and power buttons.
-- **Drag-and-drop assist**: hover over taskbar icons while dragging a file to bring the target window to foreground via low-level mouse hooks.
-- **System tray**: hide individual tray icons (chevron, network, volume, battery, clock).
-- **Window animations & borders**: custom minimize animation and exact window border color restoration.
-- **Portable**: standalone executables, no installer, no background services.
+- **macOS-style Dock**: smooth icon scaling with wave expansion, physics-based bounce, and auto-centering.
+- **Transparent Taskbar**: clear acrylic/solid background with top border removal, fully working on Windows 11 24H2.
+- **Start Button Styling**: custom icon colors, Windows accent color matching, custom sizing, and alignment offsets.
+- **Minimal Start Menu**: declutter the Start menu by toggling search, pinned apps, recommended feed, and user badges.
+- **Smart Drag & Drop**: drag any file over a taskbar icon to bring its window to the front without clicking.
+- **Clean System Tray**: hide noisy icons individually (clock, network, volume, battery, chevron).
+- **Window Animations & Borders**: lightweight window minimize effects and accurate window border styling.
+- **Zero Bloat**: single portable executable written in pure C++20, zero background services, zero telemetry.
 
 ## Architecture
 
