@@ -53,7 +53,7 @@ Settings can be opened from the system tray icon.
 
 ## Requirements & Notes
 
-- **OS**: Windows 11 64-bit (including 24H2 / build 26200+).
+- **OS**: Windows 11 64-bit (including 25H2 / build 26200+).
 - **Permissions**: Standard user permissions. Elevated privileges may be required when interacting with administrator windows.
 
 ## Build
