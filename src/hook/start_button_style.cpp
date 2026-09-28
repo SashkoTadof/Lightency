@@ -220,7 +220,6 @@ void ApplyIconColors(FrameworkElement const& icon, const SharedHookConfig& cfg, 
 
         for (const auto& brush : brushList) {
             if (auto colorBrush = brush.try_as<Composition::CompositionColorBrush>()) {
-                try { colorBrush.StopAnimation(L"Color"); } catch (const winrt::hresult_error&) {}
                 void* key = winrt::get_abi(colorBrush);
                 auto it = g_baselineColors.find(key);
                 if (it == g_baselineColors.end()) {
@@ -242,10 +241,12 @@ void ApplyIconColors(FrameworkElement const& icon, const SharedHookConfig& cfg, 
                     it = g_baselineColors.find(key);
                 }
                 const auto base = it->second;
-                colorBrush.Color(customEnabled ? TransformColor(base, cfg, accentHsl) : base);
+                const auto targetColor = customEnabled ? TransformColor(base, cfg, accentHsl) : base;
+                if (colorBrush.Color() != targetColor) {
+                    colorBrush.Color(targetColor);
+                }
             } else if (auto gradBrush = brush.try_as<Composition::CompositionGradientBrush>()) {
                 for (const auto& stop : gradBrush.ColorStops()) {
-                    try { stop.StopAnimation(L"Color"); } catch (const winrt::hresult_error&) {}
                     void* key = winrt::get_abi(stop);
                     auto it = g_baselineColors.find(key);
                     if (it == g_baselineColors.end()) {
@@ -267,36 +268,14 @@ void ApplyIconColors(FrameworkElement const& icon, const SharedHookConfig& cfg, 
                         it = g_baselineColors.find(key);
                     }
                     const auto base = it->second;
-                    stop.Color(customEnabled ? TransformColor(base, cfg, accentHsl) : base);
+                    const auto targetColor = customEnabled ? TransformColor(base, cfg, accentHsl) : base;
+                    if (stop.Color() != targetColor) {
+                        stop.Color(targetColor);
+                    }
                 }
             }
         }
     } catch (const winrt::hresult_error&) {}
-}
-
-UINT_PTR g_animTimerId = 0;
-int g_animTicksLeft = 0;
-
-void TriggerClickAnimationProtection() {
-    g_animTicksLeft = 35;
-    if (g_animTimerId == 0) {
-        g_animTimerId = SetTimer(nullptr, 0, 25, [](HWND, UINT, UINT_PTR id, DWORD) {
-            std::lock_guard lk(g_mutex);
-            if (!g_cachedConfig.startIconCustom || (!g_cachedConfig.startIconAccentColor && g_cachedConfig.startIconColorHue < 0)) {
-                KillTimer(nullptr, id);
-                g_animTimerId = 0;
-                return;
-            }
-            if (auto ic = g_trackedIcon.get()) {
-                const HslColor accentHsl = GetSystemAccentHsl();
-                ApplyIconColors(ic, g_cachedConfig, accentHsl);
-            }
-            if (--g_animTicksLeft <= 0) {
-                KillTimer(nullptr, id);
-                g_animTimerId = 0;
-            }
-        });
-    }
 }
 
 void ApplyStyleInternal(FrameworkElement const& icon, const SharedHookConfig& cfg) {
@@ -339,15 +318,10 @@ void AttachTaskbar(IUnknown* taskbarFrame) {
                 const HslColor accentHsl = GetSystemAccentHsl();
                 ApplyIconColors(ic, g_cachedConfig, accentHsl);
             }
-            TriggerClickAnimationProtection();
         };
 
         startButton.PointerEntered(onPointerEvent);
         startButton.PointerExited(onPointerEvent);
-        startButton.PointerPressed(onPointerEvent);
-        startButton.PointerReleased(onPointerEvent);
-        startButton.PointerCanceled(onPointerEvent);
-        startButton.PointerCaptureLost(onPointerEvent);
 
         auto onLayout = [](auto const&, winrt::Windows::Foundation::IInspectable const&) {
             std::lock_guard lk(g_mutex);
@@ -375,10 +349,6 @@ void AttachTaskbar(IUnknown* taskbarFrame) {
 void UpdateSettings(const SharedHookConfig& config) {
     std::lock_guard lock(g_mutex);
     g_cachedConfig = config;
-    if (!config.startIconCustom && g_animTimerId != 0) {
-        KillTimer(nullptr, g_animTimerId);
-        g_animTimerId = 0;
-    }
     if (auto icon = g_trackedIcon.get()) {
         ApplyStyleInternal(icon, config);
     }
@@ -391,10 +361,6 @@ void RefreshSettings() {
 
 void Shutdown() {
     std::lock_guard lock(g_mutex);
-    if (g_animTimerId != 0) {
-        KillTimer(nullptr, g_animTimerId);
-        g_animTimerId = 0;
-    }
     if (g_uiSettings && g_accentToken.value != 0) {
         try {
             g_uiSettings.ColorValuesChanged(g_accentToken);

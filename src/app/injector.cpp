@@ -94,9 +94,6 @@ namespace {
         if (context.best) return context.best;
         EnumWindows([](HWND window, LPARAM parameter) -> BOOL {
             auto& context = *reinterpret_cast<Context*>(parameter);
-            // Windows 11 moves the XAML island between these hosts depending
-            // on the Start/Search version.  The classic host often has no
-            // window at all, while ShellExperienceHost owns the visible one.
             const bool startHost = IsProcessWindow(window, L"StartMenuExperienceHost.exe") ||
                 IsProcessWindow(window, L"ShellExperienceHost.exe") ||
                 IsProcessWindow(window, L"SearchHost.exe");
@@ -234,9 +231,11 @@ bool Injector::InstallStartMenuHook() {
         IsThreadAlive(s_startMenuThreadId)) return true;
     HWND window = FindStartMenuWindow();
     auto threads = FindStartMenuThreads();
-    if (window) threads.insert(threads.begin(), GetWindowThreadProcessId(window, nullptr));
-    std::sort(threads.begin(), threads.end());
-    threads.erase(std::unique(threads.begin(), threads.end()), threads.end());
+    if (window) {
+        const DWORD windowThread = GetWindowThreadProcessId(window, nullptr);
+        if (windowThread && std::find(threads.begin(), threads.end(), windowThread) == threads.end())
+            threads.insert(threads.begin(), windowThread);
+    }
     if (threads.empty()) {
         LogDebug("InstallStartMenuHook: host thread not found");
         return false;
@@ -274,16 +273,33 @@ bool Injector::InstallStartMenuHook() {
         return false;
     }
     g_startMenuHostPid = hostPid;
-    if (window) SendMessageTimeoutW(window, Lightency::GetLightencyUpdateMsg(), 0, 0,
-        SMTO_ABORTIFHUNG | SMTO_BLOCK, 750, nullptr);
-    LogDebug("Start menu hook installed");
+    if (window) PostMessageW(window, Lightency::GetLightencyUpdateMsg(), 0, 0);
+    LogDebug("Start menu hooks active on " + std::to_string(g_startMenuThreadIds.size()) + " threads");
     return true;
 }
 
 bool Injector::EnsureStartMenuHook() {
+    if (!s_pSharedMemory) return false;
+    auto* pCfg = static_cast<const SharedHookConfig*>(s_pSharedMemory);
+    const bool needsHook = pCfg->startMenuSizing ||
+        pCfg->startHideSearch || pCfg->startHidePinned || pCfg->startHideRecommended ||
+        pCfg->startHideProfile || pCfg->startHidePower || pCfg->startHideViewSelector ||
+        pCfg->startHideFolders;
+    if (!needsHook) {
+        if (s_hStartMenuHook) {
+            UnhookWindowsHookEx(s_hStartMenuHook);
+            s_hStartMenuHook = nullptr;
+        }
+        for (HHOOK hook : g_startMenuThreadHooks) UnhookWindowsHookEx(hook);
+        g_startMenuThreadHooks.clear();
+        g_startMenuThreadIds.clear();
+        g_startMenuHostPid = 0;
+        s_hStartMenuWindow = nullptr;
+        s_startMenuThreadId = 0;
+        return false;
+    }
     const bool hooked = InstallStartMenuHook();
-    const bool resized = s_pSharedMemory &&
-        ApplyStartAndSearchFrameSize(static_cast<const SharedHookConfig*>(s_pSharedMemory));
+    const bool resized = ApplyStartAndSearchFrameSize(pCfg);
     return hooked || resized;
 }
 
@@ -389,7 +405,7 @@ void Injector::Update(const AppConfig& config) {
     LogDebug("Settings clear=" + std::to_string(config.clearTaskbar) +
         " dock=" + std::to_string(config.dockAnimation) +
         " tray=" + std::to_string(config.trayItems) +
-        " start=" + std::to_string(config.layoutEditor));
+        " start=" + std::to_string(config.startMenuSizing));
 
 
     if (!s_pSharedMemory || !s_hExplorerHook) {
@@ -414,7 +430,7 @@ void Injector::Update(const AppConfig& config) {
         pCfg->hideTrayVolume = config.hideTrayVolume;
         pCfg->hideTrayBattery = config.hideTrayBattery;
         pCfg->hideTrayClock = config.hideTrayClock;
-        pCfg->layoutEditor = config.layoutEditor;
+        pCfg->layoutEditor = false;
         pCfg->dragDropAssist = config.dragDropAssist;
         pCfg->clearTaskbar = config.clearTaskbar;
         pCfg->hideTaskbarBorder = config.hideTaskbarBorder;
@@ -439,16 +455,23 @@ void Injector::Update(const AppConfig& config) {
     }
 
     BroadcastToTaskbars(Lightency::GetLightencyUpdateMsg(), 0, 0);
-    if (s_hStartMenuWindow && IsWindow(s_hStartMenuWindow)) {
-        SendMessageTimeoutW(s_hStartMenuWindow, Lightency::GetLightencyUpdateMsg(),
-            0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 500, nullptr);
-    }
-    else if (!g_startMenuThreadIds.empty()) {
+    const bool needsStartHook = config.startMenuSizing ||
+        config.startHideSearch || config.startHidePinned || config.startHideRecommended ||
+        config.startHideProfile || config.startHidePower || config.startHideViewSelector ||
+        config.startHideFolders;
+    if (needsStartHook) {
+        EnsureStartMenuHook();
         for (DWORD threadId : g_startMenuThreadIds)
             PostThreadMessageW(threadId, Lightency::GetLightencyUpdateMsg(), 0, 0);
+        if (s_hStartMenuWindow && IsWindow(s_hStartMenuWindow))
+            PostMessageW(s_hStartMenuWindow, Lightency::GetLightencyUpdateMsg(), 0, 0);
+        if (s_pSharedMemory && config.startMenuSizing)
+            ApplyStartAndSearchFrameSize(static_cast<const SharedHookConfig*>(s_pSharedMemory));
+    } else {
+        if (s_hStartMenuHook || !g_startMenuThreadHooks.empty()) {
+            EnsureStartMenuHook();
+        }
     }
-    if (s_pSharedMemory)
-        ApplyStartAndSearchFrameSize(static_cast<const SharedHookConfig*>(s_pSharedMemory));
     LogDebug("Injector::Update end");
 }
 

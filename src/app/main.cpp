@@ -82,6 +82,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
     if (uMsg == WM_LIGHTENCY_APPLY_SETTINGS) {
         LogDebug("MainWndProc: WM_LIGHTENCY_APPLY_SETTINGS received");
         ConfigManager::Save(g_Config);
+        g_Config.autostart = ConfigManager::IsAutostartEnabled();
         ApplyAllSettings();
         SetTimer(hWnd, IDT_TASKBAR_RETRY_1, 100, nullptr);
         SetTimer(hWnd, IDT_TASKBAR_RETRY_2, 350, nullptr);
@@ -225,7 +226,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
     }
 
     if (!cleanupDir.empty()) {
-        Sleep(1500); // Wait for the old process to exit
+        Sleep(1500);
         
         wchar_t currentExePath[MAX_PATH]{};
         GetModuleFileNameW(nullptr, currentExePath, MAX_PATH);

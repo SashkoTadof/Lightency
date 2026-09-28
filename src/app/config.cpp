@@ -1,11 +1,14 @@
 #include "config.h"
 #include <shlobj.h>
 #include <algorithm>
+#include <optional>
 
 namespace Lightency {
 
 static const wchar_t* RUN_KEY = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+static const wchar_t* STARTUP_APPROVED_KEY = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
 static const wchar_t* APP_NAME = L"Lightency";
+static std::optional<bool> s_lastAutostartSetting;
 
 std::wstring ConfigManager::GetConfigPath() {
     wchar_t exePath[MAX_PATH];
@@ -62,7 +65,7 @@ AppConfig ConfigManager::Load() {
     cfg.hideTrayVolume = ReadBool(L"Settings", L"HideTrayVolume", false);
     cfg.hideTrayBattery = ReadBool(L"Settings", L"HideTrayBattery", false);
     cfg.hideTrayClock = ReadBool(L"Settings", L"HideTrayClock", false);
-    cfg.layoutEditor = ReadBool(L"Settings", L"LayoutEditor", true);
+    cfg.layoutEditor = false;
     cfg.dragDropAssist = ReadBool(L"Settings", L"DragDropAssist", true);
     cfg.startMenuSizing = ReadBool(L"StartMenu", L"Enabled", false);
     cfg.startMenuAdvanced = ReadBool(L"StartMenu", L"Advanced", false);
@@ -90,6 +93,8 @@ AppConfig ConfigManager::Load() {
     cfg.startIconColorHue = static_cast<int>(GetPrivateProfileIntW(L"StartButton", L"ColorHue", static_cast<UINT>(-1), path.c_str()));
     cfg.showTrayIcon = ReadBool(L"Settings", L"ShowTrayIcon", true);
     cfg.autostart = IsAutostartEnabled();
+    s_lastAutostartSetting = cfg.autostart;
+    if (cfg.autostart) SetAutostart(true);
     cfg.automaticUpdates = ReadBool(L"Settings", L"AutomaticUpdates", true);
     cfg.windowGenieAnimation = ReadBool(L"Window", L"GenieAnimation", false);
     cfg.hideWindowBorders = ReadBool(L"Window", L"HideBorders", false);
@@ -128,7 +133,7 @@ void ConfigManager::Save(const AppConfig& cfg) {
     WriteBool(L"Settings", L"HideTrayVolume", cfg.hideTrayVolume);
     WriteBool(L"Settings", L"HideTrayBattery", cfg.hideTrayBattery);
     WriteBool(L"Settings", L"HideTrayClock", cfg.hideTrayClock);
-    WriteBool(L"Settings", L"LayoutEditor", cfg.layoutEditor);
+    WritePrivateProfileStringW(L"Settings", L"LayoutEditor", nullptr, path.c_str());
     WriteBool(L"Settings", L"DragDropAssist", cfg.dragDropAssist);
     WriteBool(L"StartMenu", L"Enabled", cfg.startMenuSizing);
     WriteBool(L"StartMenu", L"Advanced", cfg.startMenuAdvanced);
@@ -158,38 +163,72 @@ void ConfigManager::Save(const AppConfig& cfg) {
     WritePrivateProfileStringW(L"Window", L"FrameRate", nullptr, path.c_str());
     WriteInt(L"Window", L"RepeatGuard", cfg.windowRepeatGuard);
     WriteInt(L"Window", L"CaptureDelay", cfg.windowCaptureDelay);
-    SetAutostart(cfg.autostart);
+    if (!s_lastAutostartSetting || cfg.autostart != *s_lastAutostartSetting) {
+        SetAutostart(cfg.autostart);
+        s_lastAutostartSetting = IsAutostartEnabled();
+    }
 }
 
 void ConfigManager::SetAutostart(bool enable) {
-    HKEY hKey;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
-        if (enable) {
-            wchar_t exePath[MAX_PATH];
-            GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-            std::wstring cmd = L"\"" + std::wstring(exePath) + L"\" --daemon";
-            RegSetValueExW(hKey, APP_NAME, 0, REG_SZ,
-                reinterpret_cast<const BYTE*>(cmd.c_str()),
-                static_cast<DWORD>((cmd.length() + 1) * sizeof(wchar_t)));
-        } else {
-            RegDeleteValueW(hKey, APP_NAME);
+    HKEY runKey = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, nullptr, 0,
+        KEY_SET_VALUE, nullptr, &runKey, nullptr) != ERROR_SUCCESS) return;
+
+    if (enable) {
+        wchar_t exePath[MAX_PATH]{};
+        const DWORD length = GetModuleFileNameW(nullptr, exePath, ARRAYSIZE(exePath));
+        if (length == 0 || length >= ARRAYSIZE(exePath)) {
+            RegCloseKey(runKey);
+            return;
         }
-        RegCloseKey(hKey);
+        const std::wstring command = L"\"" + std::wstring(exePath) + L"\" --daemon";
+        if (RegSetValueExW(runKey, APP_NAME, 0, REG_SZ,
+            reinterpret_cast<const BYTE*>(command.c_str()),
+            static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS) {
+            HKEY approvedKey = nullptr;
+            if (RegCreateKeyExW(HKEY_CURRENT_USER, STARTUP_APPROVED_KEY, 0, nullptr, 0,
+                KEY_SET_VALUE, nullptr, &approvedKey, nullptr) == ERROR_SUCCESS) {
+                const BYTE enabled[12] = { 2 };
+                RegSetValueExW(approvedKey, APP_NAME, 0, REG_BINARY, enabled, sizeof(enabled));
+                RegCloseKey(approvedKey);
+            }
+        }
+    } else {
+        RegDeleteValueW(runKey, APP_NAME);
+        HKEY approvedKey = nullptr;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, STARTUP_APPROVED_KEY, 0,
+            KEY_SET_VALUE, &approvedKey) == ERROR_SUCCESS) {
+            RegDeleteValueW(approvedKey, APP_NAME);
+            RegCloseKey(approvedKey);
+        }
     }
+    RegCloseKey(runKey);
 }
 
 bool ConfigManager::IsAutostartEnabled() {
-    HKEY hKey;
-    bool enabled = false;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS) {
-        wchar_t buf[MAX_PATH];
-        DWORD size = sizeof(buf);
-        if (RegQueryValueExW(hKey, APP_NAME, nullptr, nullptr, reinterpret_cast<LPBYTE>(buf), &size) == ERROR_SUCCESS) {
-            enabled = true;
-        }
-        RegCloseKey(hKey);
-    }
-    return enabled;
+    HKEY runKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_QUERY_VALUE, &runKey) != ERROR_SUCCESS)
+        return false;
+    wchar_t command[32768]{};
+    DWORD type = 0;
+    DWORD size = sizeof(command);
+    const bool registered = RegQueryValueExW(runKey, APP_NAME, nullptr, &type,
+        reinterpret_cast<LPBYTE>(command), &size) == ERROR_SUCCESS &&
+        (type == REG_SZ || type == REG_EXPAND_SZ) && command[0] != L'\0';
+    RegCloseKey(runKey);
+    if (!registered) return false;
+
+    HKEY approvedKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, STARTUP_APPROVED_KEY, 0,
+        KEY_QUERY_VALUE, &approvedKey) != ERROR_SUCCESS) return true;
+    BYTE approval[12]{};
+    DWORD approvalType = 0;
+    DWORD approvalSize = sizeof(approval);
+    const bool disabled = RegQueryValueExW(approvedKey, APP_NAME, nullptr,
+        &approvalType, approval, &approvalSize) == ERROR_SUCCESS &&
+        approvalType == REG_BINARY && approvalSize > 0 && approval[0] == 3;
+    RegCloseKey(approvedKey);
+    return !disabled;
 }
 
 }

@@ -10,6 +10,8 @@
 #include <stdio.h>
 #include <string>
 #include <vector>
+#include <thread>
+#include <uiautomation.h>
 #include "../common/diagnostics.h"
 
 static inline void LogDock(const std::wstring&) {}
@@ -45,7 +47,7 @@ static void EnsureLiveConfigMapped() {
             shouldDisable = true;
         }
         bool newDockAnim = shouldDisable ? false : s_pLiveSharedConfig->dockAnimation;
-        bool newLayoutEditor = shouldDisable ? false : s_pLiveSharedConfig->layoutEditor;
+        bool newLayoutEditor = false;
 
         if (s_pLiveSharedConfig->maxScale != g_lightencyDockConfig.maxScale ||
             s_pLiveSharedConfig->effectRadius != g_lightencyDockConfig.effectRadius ||
@@ -194,6 +196,8 @@ static void RemoveTaskbarHwndBorder() {
     }
 }
 
+static void HideButtonBackgroundPlate(FrameworkElement const& root);
+
 static void ApplyTaskbarAppearance(FrameworkElement const& taskbarElement) {
     if (!taskbarElement) return;
     try {
@@ -215,6 +219,8 @@ static void ApplyTaskbarAppearance(FrameworkElement const& taskbarElement) {
             const std::wstring name = element.Name().c_str();
             bool isStroke = (name == L"BackgroundStroke" || name == L"TaskbarStroke" ||
                              name == L"TopBorder" || name == L"BackgroundBorder" ||
+                             name == L"HoverBorder" || name == L"FocusBorder" ||
+                             name == L"SelectionBorder" ||
                              (!name.empty() && name.find(L"Stroke") != std::wstring::npos));
             const bool isFill = (name == L"BackgroundFill" || 
                                  (!isStroke && !name.empty() && name.find(L"Background") != std::wstring::npos));
@@ -297,6 +303,19 @@ static void ApplyTaskbarAppearance(FrameworkElement const& taskbarElement) {
                 }
             }
 
+            if (hideBorder) {
+                auto type = winrt::get_class_name(element);
+                if (type == L"Taskbar.TaskListButton" || name == L"StartButton" || type == L"Taskbar.ShowDesktopButton") {
+                    HideButtonBackgroundPlate(element);
+                } else if (auto ctrl = element.try_as<winrt::Windows::UI::Xaml::Controls::Control>()) {
+                    auto bt = ctrl.BorderThickness();
+                    if (bt.Left != 0 || bt.Top != 0 || bt.Right != 0 || bt.Bottom != 0) {
+                        ctrl.BorderThickness({ 0, 0, 0, 0 });
+                    }
+                    ctrl.BorderBrush(Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
+                }
+            }
+
             const int childCount = VisualTreeHelper::GetChildrenCount(element);
             for (int i = 0; i < childCount; ++i) {
                 if (auto child = VisualTreeHelper::GetChild(element, i).try_as<FrameworkElement>()) {
@@ -337,7 +356,42 @@ static double g_layoutDragStartX = 0;
 static double g_layoutDragStartY = 0;
 static winrt::Windows::Foundation::Point g_layoutDragOrigin{};
 static std::atomic<LONG> g_startButtonScreenCenter{-1};
+static std::atomic<LONG> g_pendingTrayFlyoutX{-1};
+static std::atomic<LONG> g_pendingTrayFlyoutY{-1};
+static std::atomic<ULONGLONG> g_pendingTrayFlyoutUntil{0};
 static HWINEVENTHOOK g_startMenuWinEventHook = nullptr;
+static bool IsShellFlyoutWindow(HWND hwnd);
+static HWND ResolveTaskbarWindow();
+static double ReadLayoutValue(const std::wstring& id, const wchar_t* axis);
+
+static LONG GetActualStartButtonCenter() {
+    HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (!taskbar) return -1;
+    HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    IUIAutomation* automation = nullptr;
+    IUIAutomationElement* root = nullptr;
+    IUIAutomationCondition* condition = nullptr;
+    IUIAutomationElement* start = nullptr;
+    LONG result = -1;
+    if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation8, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) &&
+        SUCCEEDED(automation->ElementFromHandle(taskbar, &root))) {
+        VARIANT value{};
+        value.vt = VT_BSTR;
+        value.bstrVal = SysAllocString(L"StartButton");
+        if (value.bstrVal && SUCCEEDED(automation->CreatePropertyCondition(UIA_AutomationIdPropertyId, value, &condition)) &&
+            SUCCEEDED(root->FindFirst(TreeScope_Subtree, condition, &start)) && start) {
+            RECT rect{};
+            if (SUCCEEDED(start->get_CurrentBoundingRectangle(&rect))) result = rect.left + (rect.right - rect.left) / 2;
+        }
+        VariantClear(&value);
+    }
+    if (start) start->Release();
+    if (condition) condition->Release();
+    if (root) root->Release();
+    if (automation) automation->Release();
+    if (SUCCEEDED(init)) CoUninitialize();
+    return result;
+}
 
 static bool IsStartMenuWindow(HWND hwnd) {
     if (!hwnd || GetAncestor(hwnd, GA_ROOT) != hwnd) return false;
@@ -356,26 +410,72 @@ static bool IsStartMenuWindow(HWND hwnd) {
 
 static void CALLBACK StartMenuWinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
                                            LONG objectId, LONG, DWORD, DWORD) {
-    if ((event != EVENT_OBJECT_SHOW && event != EVENT_OBJECT_LOCATIONCHANGE) ||
-        objectId != OBJID_WINDOW || !IsWindowVisible(hwnd) || !IsStartMenuWindow(hwnd)) {
+    if (!g_lightencyDockConfig.layoutEditor) return;
+    if (event == EVENT_OBJECT_SHOW && objectId == OBJID_WINDOW && hwnd) {
+        RECT diagnosticRect{};
+        GetWindowRect(hwnd, &diagnosticRect);
+        WriteDiagnostic("explorer", "layout window show hwnd=" + std::to_string(reinterpret_cast<uintptr_t>(hwnd)) +
+            " rect=" + std::to_string(diagnosticRect.left) + "," + std::to_string(diagnosticRect.top) +
+            "," + std::to_string(diagnosticRect.right) + "," + std::to_string(diagnosticRect.bottom) +
+            " start=" + std::to_string(IsStartMenuWindow(hwnd)) + " shell=" + std::to_string(IsShellFlyoutWindow(hwnd)));
+    }
+    if ((event != EVENT_OBJECT_SHOW && event != EVENT_OBJECT_LOCATIONCHANGE) || objectId != OBJID_WINDOW || !IsWindowVisible(hwnd)) {
         return;
     }
-    LONG anchor = g_startButtonScreenCenter.load();
-    if (anchor < 0) return;
+    if (event == EVENT_OBJECT_SHOW && GetTickCount64() < g_pendingTrayFlyoutUntil.load() && IsShellFlyoutWindow(hwnd)) {
+        RECT flyout{};
+        if (GetWindowRect(hwnd, &flyout)) {
+            const int width = flyout.right - flyout.left;
+            const int height = flyout.bottom - flyout.top;
+            if (width < 300 || height < 260) return;
+            POINT anchor{g_pendingTrayFlyoutX.load(), g_pendingTrayFlyoutY.load()};
+            HMONITOR monitor = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO info{sizeof(info)};
+            if (GetMonitorInfoW(monitor, &info)) {
+                int x = std::clamp(static_cast<int>(anchor.x - width / 2), static_cast<int>(info.rcWork.left), static_cast<int>(info.rcWork.right) - width);
+                int y = std::clamp(static_cast<int>(anchor.y - height - 8), static_cast<int>(info.rcWork.top), static_cast<int>(info.rcWork.bottom) - height);
+                std::thread([hwnd, x, y] {
+                    for (DWORD delay : {80u, 180u, 360u}) {
+                        Sleep(delay);
+                        if (!IsWindow(hwnd)) return;
+                        SetWindowPos(hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    }
+                }).detach();
+            }
+        }
+        g_pendingTrayFlyoutUntil.store(0);
+        return;
+    }
+    if (!IsStartMenuWindow(hwnd)) return;
     RECT rect{};
     if (!GetWindowRect(hwnd, &rect)) return;
     int width = rect.right - rect.left;
-    POINT anchorPoint{anchor, rect.bottom};
+    POINT anchorPoint{rect.left + width / 2, rect.bottom};
     HMONITOR monitor = MonitorFromPoint(anchorPoint, MONITOR_DEFAULTTONEAREST);
     MONITORINFO monitorInfo{sizeof(monitorInfo)};
     if (!GetMonitorInfoW(monitor, &monitorInfo)) return;
-    int targetX = anchor - width / 2;
+    LONG anchor = GetActualStartButtonCenter();
+    if (anchor < 0) anchor = g_startButtonScreenCenter.load();
+    const double dpiScale = static_cast<double>(GetDpiForWindow(FindWindowW(L"Shell_TrayWnd", nullptr))) / 96.0;
+    const double savedStartOffset = ReadLayoutValue(L"start", L"x") * (dpiScale > 0.0 ? dpiScale : 1.0);
+    if (anchor < 0 && std::abs(savedStartOffset) < 0.5) return;
+    int targetX = std::abs(savedStartOffset) > 0.5
+        ? rect.left + static_cast<int>(std::lround(savedStartOffset))
+        : anchor - width / 2;
+    int targetY = rect.top;
     targetX = std::clamp(targetX, static_cast<int>(monitorInfo.rcWork.left),
                          static_cast<int>(monitorInfo.rcWork.right) - width);
-    if (std::abs(targetX - rect.left) > 1) {
-        SetWindowPos(hwnd, nullptr, targetX, rect.top, 0, 0,
-                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    }
+    const int height = rect.bottom - rect.top;
+    targetY = std::clamp(targetY, static_cast<int>(monitorInfo.rcWork.top),
+                         static_cast<int>(monitorInfo.rcWork.bottom) - height);
+    if (std::abs(targetX - rect.left) <= 1 && std::abs(targetY - rect.top) <= 1) return;
+    std::thread([hwnd, targetX, targetY] {
+        for (DWORD delay : {60u, 160u, 360u}) {
+            Sleep(delay);
+            if (!IsWindow(hwnd)) return;
+            SetWindowPos(hwnd, nullptr, targetX, targetY, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }).detach();
 }
 
 static std::wstring LayoutConfigPath() {
@@ -397,7 +497,62 @@ static std::wstring GetLayoutId(FrameworkElement const& element) {
     std::wstring automationId = TrayToLower(AutomationProperties::GetAutomationId(element).c_str());
     std::wstring className = TrayToLower(winrt::get_class_name(element).c_str());
     if (automationId == L"startbutton" && ContainsAny(className, {L"button"})) return L"start";
+    if (className == L"taskbar.tasklistbutton") return L"apps";
+
+    if (identity.find(L"chevron") != std::wstring::npos || identity.find(L"overflow") != std::wstring::npos) return L"tray_chevron";
+    if (identity.find(L"language") != std::wstring::npos || identity.find(L"inputindicator") != std::wstring::npos) return L"tray_language";
+    if (identity.find(L"network") != std::wstring::npos || identity.find(L"wifi") != std::wstring::npos) return L"tray_network";
+    if (identity.find(L"volume") != std::wstring::npos || identity.find(L"audio") != std::wstring::npos) return L"tray_volume";
+    if (identity.find(L"battery") != std::wstring::npos || identity.find(L"power") != std::wstring::npos) return L"tray_battery";
+    if (identity.find(L"clock") != std::wstring::npos || identity.find(L"datetime") != std::wstring::npos) return L"tray_clock";
+    if (identity.find(L"controlcenter") != std::wstring::npos || identity.find(L"quicksettings") != std::wstring::npos) return L"tray_control_center";
+
+    if (identity.find(L"searchbutton") != std::wstring::npos) return L"search";
+    if (identity.find(L"taskview") != std::wstring::npos) return L"taskview";
+    if (identity.find(L"widget") != std::wstring::npos) return L"widgets";
     return L"";
+}
+
+static FrameworkElement FindAppLayoutHost(const FrameworkElement& root) {
+    FrameworkElement best = nullptr;
+    double bestArea = DBL_MAX;
+    std::vector<FrameworkElement> stack{root};
+    while (!stack.empty()) {
+        auto current = stack.back();
+        stack.pop_back();
+        const int count = VisualTreeHelper::GetChildrenCount(current);
+        int appButtons = 0;
+        for (int i = 0; i < count; ++i) {
+            if (auto child = VisualTreeHelper::GetChild(current, i).try_as<FrameworkElement>()) {
+                const auto cls = winrt::get_class_name(child);
+                if (cls == L"Taskbar.TaskListButton" || cls == L"Taskbar.TaskListButtonPanel") ++appButtons;
+                stack.push_back(child);
+            }
+        }
+        const double area = current.ActualWidth() * current.ActualHeight();
+        if (appButtons >= 2 && area > 1.0 && area < bestArea) {
+            best = current;
+            bestArea = area;
+        }
+    }
+    return best;
+}
+
+static bool IsShellFlyoutWindow(HWND hwnd) {
+    if (!hwnd || GetAncestor(hwnd, GA_ROOT) != hwnd) return false;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    HANDLE process = pid ? OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) : nullptr;
+    if (!process) return false;
+    wchar_t path[MAX_PATH] = {};
+    DWORD pathLength = ARRAYSIZE(path);
+    std::wstring lower;
+    bool found = QueryFullProcessImageNameW(process, 0, path, &pathLength);
+    if (found) lower = TrayToLower(path);
+    bool result = found && (lower.find(L"shellexperiencehost.exe") != std::wstring::npos ||
+                            lower.find(L"explorer.exe") != std::wstring::npos);
+    CloseHandle(process);
+    return result;
 }
 
 static double ReadLayoutValue(const std::wstring& id, const wchar_t* axis) {
@@ -469,7 +624,7 @@ static void ApplySavedLayout(FrameworkElement const& root) {
         FrameworkElement element = stack.back();
         stack.pop_back();
         std::wstring id = GetLayoutId(element);
-        if (!id.empty() && seenIds.insert(id).second) EnsureLayoutElement(element, id);
+        if (!id.empty() && (id == L"apps" || seenIds.insert(id).second)) EnsureLayoutElement(element, id);
         int count = VisualTreeHelper::GetChildrenCount(element);
         for (int i = 0; i < count; ++i) {
             if (auto child = VisualTreeHelper::GetChild(element, i).try_as<FrameworkElement>()) {
@@ -519,10 +674,9 @@ static FrameworkElement FindLayoutElementAt(FrameworkElement const& root,
     while (!stack.empty()) {
         FrameworkElement element = stack.back();
         stack.pop_back();
-        std::wstring id = GetLayoutId(element);
         void* elementKey = winrt::get_abi(element);
         auto registered = g_layoutElements.find(elementKey);
-        if (!id.empty() && registered != g_layoutElements.end() &&
+        if (registered != g_layoutElements.end() &&
             registered->second.element.get() &&
             element.ActualWidth() > 1 && element.ActualHeight() > 1) {
             try {
@@ -565,6 +719,10 @@ static bool HandleLayoutPointerMove(FrameworkElement const& root,
         auto target = FindLayoutElementAt(layoutRoot, point);
         if (!target) return false;
         std::wstring id = GetLayoutId(target);
+        if (id.empty()) {
+            auto existing = g_layoutElements.find(winrt::get_abi(target));
+            if (existing != g_layoutElements.end()) id = existing->second.id;
+        }
         if (id.empty()) return false;
         g_layoutDragElement = target;
         auto* state = EnsureLayoutElement(target, id);
@@ -587,9 +745,38 @@ static bool HandleLayoutPointerMove(FrameworkElement const& root,
     auto it = g_layoutElements.find(key);
     if (it == g_layoutElements.end()) return false;
     SetLayoutOffset(it->second, x, y);
+    if (it->second.id == L"apps") {
+        for (auto& [otherKey, other] : g_layoutElements) {
+            if (otherKey != key && other.id == L"apps") SetLayoutOffset(other, x, y);
+        }
+    }
     SaveLayoutValue(it->second.id, x, y);
+    ApplySavedLayout(layoutRoot);
     args.Handled(true);
     return true;
+}
+
+static void HandleLayoutPointerPressed(FrameworkElement const& root,
+                                       Input::PointerRoutedEventArgs const& args) {
+    if (!root || !args || !g_lightencyDockConfig.layoutEditor) return;
+    FrameworkElement layoutRoot = root;
+    while (auto parent = VisualTreeHelper::GetParent(layoutRoot).try_as<FrameworkElement>()) layoutRoot = parent;
+    ApplySavedLayout(layoutRoot);
+    auto target = FindLayoutElementAt(layoutRoot, args.GetCurrentPoint(layoutRoot).Position());
+    if (!target) return;
+    const std::wstring id = GetLayoutId(target);
+    if (id.rfind(L"tray_", 0) != 0) return;
+    try {
+        auto origin = target.TransformToVisual(layoutRoot).TransformPoint({0, 0});
+        HWND taskbar = ResolveTaskbarWindow();
+        RECT taskbarRect{};
+        const double scale = layoutRoot.XamlRoot() ? layoutRoot.XamlRoot().RasterizationScale() : 1.0;
+        if (taskbar && GetWindowRect(taskbar, &taskbarRect)) {
+            g_pendingTrayFlyoutX.store(taskbarRect.left + static_cast<LONG>((origin.X + target.ActualWidth() / 2.0) * scale));
+            g_pendingTrayFlyoutY.store(taskbarRect.top + static_cast<LONG>(origin.Y * scale));
+            g_pendingTrayFlyoutUntil.store(GetTickCount64() + 1200);
+        }
+    } catch (const winrt::hresult_error&) {}
 }
 
 static std::wstring TrayToLower(std::wstring value) {
@@ -776,28 +963,59 @@ static void ApplyTrayItemVisibility(FrameworkElement const& taskbarElement) {
 static void HideButtonBackgroundPlate(FrameworkElement const& root) {
     if (!root) return;
     try {
-        auto btn = root.try_as<Controls::Button>();
-        if (btn) {
-            btn.Background(Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
-            btn.BorderBrush(Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
-            btn.BorderThickness({ 0, 0, 0, 0 });
+        if (auto ctrl = root.try_as<Controls::Control>()) {
+            ctrl.Background(Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
+            ctrl.BorderBrush(Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
+            auto bt = ctrl.BorderThickness();
+            if (bt.Left != 0 || bt.Top != 0 || bt.Right != 0 || bt.Bottom != 0) {
+                ctrl.BorderThickness({ 0, 0, 0, 0 });
+            }
         }
         int count = VisualTreeHelper::GetChildrenCount(root);
         for (int i = 0; i < count; i++) {
             auto child = VisualTreeHelper::GetChild(root, i).try_as<FrameworkElement>();
             if (!child) continue;
-            auto cn = winrt::get_class_name(child);
-            if (cn == L"Windows.UI.Xaml.Controls.Border") {
-                auto b = child.try_as<Controls::Border>();
-                if (b) {
+
+            const std::wstring name = child.Name().c_str();
+            bool isIndicator = (name.find(L"Indicator") != std::wstring::npos ||
+                                name.find(L"Active") != std::wstring::npos ||
+                                name.find(L"Running") != std::wstring::npos);
+
+            if (!isIndicator) {
+                if (auto b = child.try_as<Controls::Border>()) {
                     double h = b.ActualHeight();
-                    if (h > 10.0 || b.Height() > 10.0 || b.Name() == L"BackgroundBorder" || b.Name() == L"HoverBorder") {
-                        b.Opacity(0.0);
-                        b.Background(Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
+                    double w = b.ActualWidth();
+                    if ((h == 0.0 && w == 0.0) || h > 6.0 || b.Height() > 6.0) {
                         b.BorderBrush(Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
+                        auto bt = b.BorderThickness();
+                        if (bt.Left != 0 || bt.Top != 0 || bt.Right != 0 || bt.Bottom != 0) {
+                            b.BorderThickness({ 0, 0, 0, 0 });
+                        }
+                        if (name == L"BackgroundBorder" || name == L"HoverBorder" ||
+                            name == L"FocusBorder" || name == L"SelectionBorder") {
+                            b.Background(Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
+                            b.Opacity(0.0);
+                        }
+                    }
+                } else if (auto shape = child.try_as<winrt::Windows::UI::Xaml::Shapes::Shape>()) {
+                    double h = shape.ActualHeight();
+                    if (h == 0.0 || h > 6.0 || shape.Height() > 6.0) {
+                        shape.Stroke(Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
+                        shape.StrokeThickness(0.0);
+                        if (name == L"BackgroundBorder" || name == L"HoverBorder" || name == L"FocusBorder") {
+                            shape.Fill(Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
+                            shape.Opacity(0.0);
+                        }
+                    }
+                } else if (auto cp = child.try_as<Controls::ContentPresenter>()) {
+                    cp.BorderBrush(Media::SolidColorBrush(winrt::Windows::UI::Colors::Transparent()));
+                    auto bt = cp.BorderThickness();
+                    if (bt.Left != 0 || bt.Top != 0 || bt.Right != 0 || bt.Bottom != 0) {
+                        cp.BorderThickness({ 0, 0, 0, 0 });
                     }
                 }
             }
+
             HideButtonBackgroundPlate(child);
         }
     } catch (const winrt::hresult_error&) {}
@@ -849,9 +1067,11 @@ struct XamlPointerSubscription {
     winrt::weak_ref<FrameworkElement> element;
     Input::PointerEventHandler moved{nullptr};
     Input::PointerEventHandler exited{nullptr};
+    Input::PointerEventHandler pressed{nullptr};
     winrt::Windows::Foundation::EventHandler<winrt::Windows::Foundation::IInspectable> layoutUpdated{nullptr};
     winrt::event_token movedToken{};
     winrt::event_token exitedToken{};
+    winrt::event_token pressedToken{};
     winrt::event_token layoutUpdatedToken{};
 };
 
@@ -1271,6 +1491,10 @@ static void RegisterDockItem(Lightency::DockSession& session,
     auto taskbarFrame = session.taskbarFrame.get();
     if (!taskbarFrame) return;
 
+    if (g_lightencyDockConfig.clearTaskbar || g_lightencyDockConfig.hideTaskbarBorder) {
+        HideButtonBackgroundPlate(element);
+    }
+
     PrepareHighResolutionIconSources(element, static_cast<double>(g_lightencyDockConfig.maxScale) / 100.0);
 
     FrameworkElement targetElement = element;
@@ -1386,6 +1610,12 @@ static void RebuildSessionItems(Lightency::DockSession& session) {
             }
             FrameworkElement target = FindButtonInSubtree(child);
             if (!target) target = child;
+            if (g_lightencyDockConfig.clearTaskbar || g_lightencyDockConfig.hideTaskbarBorder) {
+                HideButtonBackgroundPlate(child);
+                if (target && target != child) {
+                    HideButtonBackgroundPlate(target);
+                }
+            }
             RegisterDockItem(session, target, newItems, preservedStates);
         }
         session.fingerprint = EvaluateContainerFingerprint(container, session.isVertical);
@@ -1782,6 +2012,9 @@ static void DockEngine_Cleanup() {
                     if (auto el = s->element.get()) {
                         el.PointerMoved(s->movedToken);
                         el.PointerExited(s->exitedToken);
+                        if (s->pressed) {
+                            el.RemoveHandler(UIElement::PointerPressedEvent(), winrt::box_value(s->pressed));
+                        }
                         if (s->layoutUpdated) {
                             el.LayoutUpdated(s->layoutUpdatedToken);
                         }
@@ -1951,7 +2184,6 @@ void DockAnimation::AttachXamlElement(IUnknown* object) {
                 EnsureLiveConfigMapped();
                 ApplyTaskbarAppearance(frame);
                 ApplyTrayItemVisibility(frame);
-                if (HandleLayoutPointerMove(frame, args)) return;
                 if (taskbar && g_lightencyDockConfig.dockAnimation) {
                     HandleSessionPointerMoved(key, args);
                 } else if (taskbar) {
@@ -2007,15 +2239,15 @@ void DockAnimation::AttachXamlElement(IUnknown* object) {
 }
 
 bool DockAnimation::Initialize() {
-    if (!g_startMenuWinEventHook) {
-        g_startMenuWinEventHook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_LOCATIONCHANGE,
-            nullptr, StartMenuWinEventProc, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
-    }
     Lightency::DragDropAssist::SetEnabled(g_lightencyDockConfig.dragDropAssist);
     return XamlBridge::Initialize();
 }
 
 void DockAnimation::Shutdown() {
+    if (g_startMenuWinEventHook) {
+        UnhookWinEvent(g_startMenuWinEventHook);
+        g_startMenuWinEventHook = nullptr;
+    }
     HWND hWnd = ResolveTaskbarWindow();
     if (hWnd) {
         DispatchToTaskbarThread(hWnd, [](PVOID) {
@@ -2034,6 +2266,7 @@ void DockAnimation::Shutdown() {
 
 void DockAnimation::UpdateSettings(const SharedHookConfig& config) {
     g_lightencyDockConfig = config;
+    g_lightencyDockConfig.layoutEditor = false;
     StartButtonStyle::UpdateSettings(config);
     DockEngine_ApplySettings();
 }

@@ -462,7 +462,6 @@ static std::vector<RowItem> GetCurrentItems() {
             items.push_back({ L"Search height", RowType::Stepper, false, SubPage::None, nullptr, &g_pConfig->searchHeight, 400, 1200, 20, L"px" });
         }
     } else if (g_subPage == SubPage::StartButtonSettings) {
-        items.push_back({ L"Move Start button", RowType::Toggle, false, SubPage::None, &g_pConfig->layoutEditor });
         items.push_back({ L"Icon scale", RowType::Stepper, false, SubPage::None, nullptr, &g_pConfig->startIconSize, 50, 180, 5, L"%" });
         items.push_back({ L"Start Color", RowType::Toggle, false, SubPage::None, &g_pConfig->startIconCustom });
         if (g_pConfig->startIconCustom) {

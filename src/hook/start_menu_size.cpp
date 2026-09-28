@@ -387,6 +387,28 @@ bool HandleStartLayoutPointer(const FrameworkElement& root, const Input::Pointer
     return true;
 }
 
+void EnsureStartLayoutHandlers(const FrameworkElement& content) {
+    if (!content || !g_settings.layoutEditor || content.ActualWidth() <= 1 || content.ActualHeight() <= 1) return;
+    if (!g_pointerMovedHandler) {
+        g_pointerMovedHandler = Input::PointerEventHandler([](const winrt::Windows::Foundation::IInspectable& sender, const Input::PointerRoutedEventArgs& args) {
+            if (auto el = sender.try_as<FrameworkElement>()) HandleStartLayoutPointer(el, args);
+        });
+        content.AddHandler(UIElement::PointerMovedEvent(), winrt::box_value(g_pointerMovedHandler), true);
+    }
+    if (!g_pointerPressedHandler) {
+        g_pointerPressedHandler = Input::PointerEventHandler([](const winrt::Windows::Foundation::IInspectable& sender, const Input::PointerRoutedEventArgs& args) {
+            if (auto el = sender.try_as<FrameworkElement>()) HandleStartLayoutPointer(el, args);
+        });
+        content.AddHandler(UIElement::PointerPressedEvent(), winrt::box_value(g_pointerPressedHandler), true);
+    }
+    if (!g_pointerReleasedHandler) {
+        g_pointerReleasedHandler = Input::PointerEventHandler([](const winrt::Windows::Foundation::IInspectable&, const Input::PointerRoutedEventArgs&) {
+            g_startDragElement = nullptr;
+        });
+        content.AddHandler(UIElement::PointerReleasedEvent(), winrt::box_value(g_pointerReleasedHandler), true);
+    }
+}
+
 struct HiddenElement {
     winrt::weak_ref<FrameworkElement> element;
     Visibility visibility;
@@ -668,7 +690,7 @@ bool Load() {
     if (config) {
         SharedHookConfig cfg = SharedHookConfig::Read(config);
         g_settings.enabled = cfg.startMenuSizing;
-        g_settings.layoutEditor = cfg.layoutEditor;
+        g_settings.layoutEditor = false;
         g_settings.hideSearch = cfg.startHideSearch;
         g_settings.hidePinned = cfg.startHidePinned;
         g_settings.hideRecommended = cfg.startHideRecommended;
@@ -714,7 +736,7 @@ bool RefreshSettings() {
         auto content = window.Content().try_as<FrameworkElement>();
         if (!content) return false;
 
-        const bool needsHooks = g_settings.enabled || g_settings.layoutEditor ||
+        const bool needsHooks = g_settings.enabled ||
             g_settings.hideSearch || g_settings.hidePinned || g_settings.hideRecommended ||
             g_settings.hideProfile || g_settings.hidePower || g_settings.hideViewSelector ||
             g_settings.hideFolders;
@@ -743,30 +765,12 @@ bool RefreshSettings() {
         }
 
         if (!g_layoutToken) {
-            g_layoutToken = content.LayoutUpdated([](const auto&, const auto&) { Apply(); });
-        }
-        if (!g_pointerMovedHandler) {
-            g_pointerMovedHandler = Input::PointerEventHandler([](const winrt::Windows::Foundation::IInspectable& sender, const Input::PointerRoutedEventArgs& args) {
-                if (auto el = sender.try_as<FrameworkElement>()) {
-                    HandleStartLayoutPointer(el, args);
-                }
+            g_layoutToken = content.LayoutUpdated([](const auto& sender, const auto&) {
+                Apply();
+                if (auto el = sender.try_as<FrameworkElement>()) EnsureStartLayoutHandlers(el);
             });
-            content.AddHandler(UIElement::PointerMovedEvent(), winrt::box_value(g_pointerMovedHandler), true);
         }
-        if (!g_pointerPressedHandler) {
-            g_pointerPressedHandler = Input::PointerEventHandler([](const winrt::Windows::Foundation::IInspectable& sender, const Input::PointerRoutedEventArgs& args) {
-                if (auto el = sender.try_as<FrameworkElement>()) {
-                    HandleStartLayoutPointer(el, args);
-                }
-            });
-            content.AddHandler(UIElement::PointerPressedEvent(), winrt::box_value(g_pointerPressedHandler), true);
-        }
-        if (!g_pointerReleasedHandler) {
-            g_pointerReleasedHandler = Input::PointerEventHandler([](const winrt::Windows::Foundation::IInspectable&, const Input::PointerRoutedEventArgs&) {
-                g_startDragElement = nullptr;
-            });
-            content.AddHandler(UIElement::PointerReleasedEvent(), winrt::box_value(g_pointerReleasedHandler), true);
-        }
+        EnsureStartLayoutHandlers(content);
         Apply();
         return true;
     } catch (const winrt::hresult_error&) {
@@ -798,4 +802,3 @@ void Shutdown() {
     g_pointerReleasedHandler = nullptr;
 }
 }
-

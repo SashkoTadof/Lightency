@@ -35,7 +35,7 @@ using pfnSetWindowCompositionAttribute = BOOL(WINAPI*)(HWND, WINCOMPATTRDATA*);
 
 namespace Lightency {
 
-inline constexpr const wchar_t* SHARED_HOOK_CONFIG_MAPPING_NAME = L"Lightency_Shared_Config_v10";
+inline constexpr const wchar_t* SHARED_HOOK_CONFIG_MAPPING_NAME = L"Lightency_Shared_Config_v13";
 
 struct SharedHookConfig {
     std::atomic<uint32_t> seq;

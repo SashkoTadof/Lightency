@@ -19,13 +19,16 @@ static bool IsExplorerProcess() {
 }
 
 static bool IsStartMenuProcess() {
-    wchar_t path[MAX_PATH] = {};
-    if (!GetModuleFileNameW(nullptr, path, ARRAYSIZE(path))) return false;
-    const wchar_t* name = wcsrchr(path, L'\\');
-    name = name ? name + 1 : path;
-    return _wcsicmp(name, L"StartMenuExperienceHost.exe") == 0 ||
-        _wcsicmp(name, L"ShellExperienceHost.exe") == 0 ||
-        _wcsicmp(name, L"SearchHost.exe") == 0;
+    static const bool isStartMenuProcess = [] {
+        wchar_t path[MAX_PATH] = {};
+        if (!GetModuleFileNameW(nullptr, path, ARRAYSIZE(path))) return false;
+        const wchar_t* name = wcsrchr(path, L'\\');
+        name = name ? name + 1 : path;
+        return _wcsicmp(name, L"StartMenuExperienceHost.exe") == 0 ||
+            _wcsicmp(name, L"ShellExperienceHost.exe") == 0 ||
+            _wcsicmp(name, L"SearchHost.exe") == 0;
+    }();
+    return isStartMenuProcess;
 }
 
 static bool IsOwnerProcessAlive(DWORD pid) {
@@ -101,20 +104,23 @@ extern "C" __declspec(dllexport) LRESULT CALLBACK LightencyHookProc(
     int code, WPARAM wParam, LPARAM lParam) {
     if (code == HC_ACTION && lParam) {
         const auto* message = reinterpret_cast<const CWPSTRUCT*>(lParam);
+        const bool update = message->message == Lightency::GetLightencyUpdateMsg();
+        const bool startShowing = message->message == WM_SHOWWINDOW && message->wParam;
+        if (!update && !startShowing)
+            return CallNextHookEx(nullptr, code, wParam, lParam);
         if (IsStartMenuProcess()) {
             thread_local bool initialized = false;
-            if (!initialized || message->message == Lightency::GetLightencyUpdateMsg())
+            if (update || !initialized)
                 initialized = Lightency::StartMenuSize::RefreshSettings();
             return CallNextHookEx(nullptr, code, wParam, lParam);
         }
-        if (message->message == Lightency::GetLightencyUpdateMsg()) {
-            if (g_hookReady.load(std::memory_order_acquire)) {
-                Lightency::DockAnimation::RefreshSettings();
-            } else {
-                HMODULE hSelf = nullptr;
-                GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(StartExtensionWorker), &hSelf);
-                StartExtensionWorker(hSelf);
-            }
+        if (!update) return CallNextHookEx(nullptr, code, wParam, lParam);
+        if (g_hookReady.load(std::memory_order_acquire)) {
+            Lightency::DockAnimation::RefreshSettings();
+        } else {
+            HMODULE hSelf = nullptr;
+            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(StartExtensionWorker), &hSelf);
+            StartExtensionWorker(hSelf);
         }
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);

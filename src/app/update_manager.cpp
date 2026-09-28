@@ -668,7 +668,6 @@ bool ExecuteUpdatePayload(const std::wstring& zipPath, std::wstring& errorMsg) {
     std::wstring exeOld = targetDir + L"\\lightency.exe.old";
     std::wstring dllOld = targetDir + L"\\lightency_hook.dll.old";
     
-    // Kill StartMenuExperienceHost to force it to restart with the new DLL unloaded.
     STARTUPINFOW siKill{ sizeof(siKill) };
     PROCESS_INFORMATION piKill{};
     siKill.dwFlags = STARTF_USESHOWWINDOW;
@@ -682,17 +681,13 @@ bool ExecuteUpdatePayload(const std::wstring& zipPath, std::wstring& errorMsg) {
         CloseHandle(piKill.hThread);
     }
 
-    // Delete any existing .old files first
     DeleteFileW(exeOld.c_str());
     DeleteFileW(dllOld.c_str());
 
-    // Rename current files
     MoveFileW((targetDir + L"\\lightency.exe").c_str(), exeOld.c_str());
     MoveFileW((targetDir + L"\\lightency_hook.dll").c_str(), dllOld.c_str());
 
-    // Copy new executables natively to ensure atomicity
     if (!CopyFileW((sourceDir + L"\\lightency.exe").c_str(), (targetDir + L"\\lightency.exe").c_str(), FALSE)) {
-        // Rollback
         DeleteFileW((targetDir + L"\\lightency.exe").c_str());
         MoveFileW(exeOld.c_str(), (targetDir + L"\\lightency.exe").c_str());
         MoveFileW(dllOld.c_str(), (targetDir + L"\\lightency_hook.dll").c_str());
@@ -702,7 +697,6 @@ bool ExecuteUpdatePayload(const std::wstring& zipPath, std::wstring& errorMsg) {
 
     CopyFileW((sourceDir + L"\\lightency_hook.dll").c_str(), (targetDir + L"\\lightency_hook.dll").c_str(), FALSE);
 
-    // Xcopy the rest
     wchar_t sysDir2[MAX_PATH]{};
     GetSystemDirectoryW(sysDir2, MAX_PATH);
     std::wstring xcopyCmd = std::wstring(sysDir2) + L"\\cmd.exe /c xcopy /y /e /i /q \"" + sourceDir + L"\\*\" \"" + targetDir + L"\\\"";
@@ -718,7 +712,6 @@ bool ExecuteUpdatePayload(const std::wstring& zipPath, std::wstring& errorMsg) {
         CloseHandle(piXcopy.hThread);
     }
 
-    // Launch new process
     std::wstring launchCmd = L"\"" + targetDir + L"\\lightency.exe\" --cleanup-update \"" + tempDir + L"\"";
     STARTUPINFOW siLaunch{ sizeof(siLaunch) };
     PROCESS_INFORMATION piLaunch{};
