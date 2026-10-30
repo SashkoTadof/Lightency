@@ -49,4 +49,3 @@ echo.
 echo Lightency portable release built in: %RELEASE_DIR%
 echo ZIP archive created: %ZIP_PATH%
 powershell -NoProfile -Command "Start-Process '%~dp0%RELEASE_DIR%\lightency.exe' -WorkingDirectory '%~dp0%RELEASE_DIR%'"
-

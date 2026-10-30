@@ -12,6 +12,8 @@
 #include <propkey.h>
 #include <mutex>
 #include <string>
+#include <memory>
+#include <new>
 #include <unordered_map>
 
 namespace {
@@ -24,9 +26,14 @@ struct TargetSet {
 };
 
 std::mutex targetsMutex;
+std::mutex watcherLifecycleMutex;
 std::unordered_map<void*, TargetSet> targetSets;
 std::atomic<bool> enabled{false};
 std::atomic<bool> workerRunning{false};
+std::atomic<bool> activationInFlight{false};
+HANDLE g_watcherThread = nullptr;
+HANDLE g_watcherReadyEvent = nullptr;
+DWORD g_watcherThreadId = 0;
 
 bool Contains(const RECT& rect, POINT point) {
     return point.x >= rect.left && point.x < rect.right &&
@@ -239,7 +246,71 @@ bool Activate(IUIAutomation* automation, POINT center, HWND taskbar, unsigned in
     return directActivation;
 }
 
-static IUIAutomation* g_automation = nullptr;
+struct ActivationRequest {
+    POINT point;
+    HWND taskbar;
+    unsigned int index;
+    HMODULE moduleReference;
+};
+
+struct ActivationModuleRelease {
+    PTP_CALLBACK_INSTANCE callbackInstance;
+    HMODULE module;
+    ~ActivationModuleRelease() {
+        if (module) FreeLibraryWhenCallbackReturns(callbackInstance, module);
+    }
+};
+
+struct ActivationInFlightReset {
+    ~ActivationInFlightReset() {
+        activationInFlight.store(false, std::memory_order_release);
+    }
+};
+
+VOID CALLBACK RunActivation(PTP_CALLBACK_INSTANCE callbackInstance, void* parameter) {
+    std::unique_ptr<ActivationRequest> request(static_cast<ActivationRequest*>(parameter));
+    ActivationInFlightReset inFlightReset;
+    ActivationModuleRelease moduleRelease{callbackInstance, request->moduleReference};
+    const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(apartment) && apartment != RPC_E_CHANGED_MODE) return;
+
+    IUIAutomation* automation = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation8, nullptr, CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(&automation))) && automation) {
+        if (enabled.load(std::memory_order_acquire))
+            Activate(automation, request->point, request->taskbar, request->index);
+        automation->Release();
+    }
+    if (apartment == S_OK || apartment == S_FALSE) CoUninitialize();
+}
+
+bool QueueActivation(POINT point, HWND taskbar, unsigned int index) {
+    bool expected = false;
+    if (!activationInFlight.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+        return true;
+
+    HMODULE moduleReference = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+            reinterpret_cast<LPCWSTR>(RunActivation), &moduleReference)) {
+        activationInFlight.store(false, std::memory_order_release);
+        return false;
+    }
+
+    auto* request = new (std::nothrow) ActivationRequest{point, taskbar, index, moduleReference};
+    if (!request) {
+        FreeLibrary(moduleReference);
+        activationInFlight.store(false, std::memory_order_release);
+        return false;
+    }
+    if (!TrySubmitThreadpoolCallback(RunActivation, request, nullptr)) {
+        delete request;
+        FreeLibrary(moduleReference);
+        activationInFlight.store(false, std::memory_order_release);
+        return false;
+    }
+    return true;
+}
+
 static HHOOK g_mouseHook = nullptr;
 static bool g_buttonWasDown = false;
 static bool g_startedOnTaskbar = false;
@@ -258,10 +329,10 @@ LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode >= 0 && enabled.load(std::memory_order_acquire)) {
         if (wParam == WM_MOUSEMOVE || wParam == WM_LBUTTONDOWN || wParam == WM_LBUTTONUP ||
             wParam == WM_RBUTTONDOWN || wParam == WM_RBUTTONUP) {
-            
+
             MSLLHOOKSTRUCT* pMouse = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
             POINT cursor = pMouse->pt;
-            
+
             const bool buttonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 ||
                                   (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
 
@@ -353,7 +424,11 @@ LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
                     g_activatedTaskbar = foundTaskbar;
                     g_activatedIndex = foundIndex;
                     g_activationPoint = cursor;
-                    Activate(g_automation, cursor, foundWindow, static_cast<unsigned int>(foundIndex));
+                    if (!QueueActivation(cursor, foundWindow, static_cast<unsigned int>(foundIndex))) {
+                        g_activationArmed = true;
+                        g_activatedTaskbar = nullptr;
+                        g_activatedIndex = -1;
+                    }
                 }
             }
             g_buttonWasDown = buttonDown;
@@ -362,14 +437,12 @@ LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
 
-DWORD WINAPI Watcher(void*) {
-    const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    CoCreateInstance(CLSID_CUIAutomation8, nullptr, CLSCTX_INPROC_SERVER,
-        IID_PPV_ARGS(&g_automation));
-
+DWORD WINAPI Watcher(void* readyEvent) {
+    MSG msg{};
+    PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
+    SetEvent(static_cast<HANDLE>(readyEvent));
     g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseHookProc, GetModuleHandleW(nullptr), 0);
-    
-    MSG msg;
+
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         if (!enabled.load(std::memory_order_acquire)) break;
         TranslateMessage(&msg);
@@ -381,35 +454,67 @@ DWORD WINAPI Watcher(void*) {
         g_mouseHook = nullptr;
     }
 
-    if (g_automation) {
-        g_automation->Release();
-        g_automation = nullptr;
-    }
-    if (SUCCEEDED(apartment)) CoUninitialize();
     workerRunning.store(false, std::memory_order_release);
     return 0;
 }
 
-static DWORD g_watcherThreadId = 0;
+void StopWatcher() {
+    enabled.store(false, std::memory_order_release);
+    HANDLE thread = g_watcherThread;
+    const DWORD threadId = g_watcherThreadId;
+    if (thread) {
+        if (g_watcherReadyEvent) WaitForSingleObject(g_watcherReadyEvent, INFINITE);
+        if (threadId && GetCurrentThreadId() != threadId &&
+            WaitForSingleObject(thread, 0) == WAIT_TIMEOUT)
+            PostThreadMessageW(threadId, WM_QUIT, 0, 0);
+        if (GetCurrentThreadId() != threadId)
+            WaitForSingleObject(thread, INFINITE);
+        if (thread == g_watcherThread && GetCurrentThreadId() != threadId) {
+            CloseHandle(thread);
+            g_watcherThread = nullptr;
+            g_watcherThreadId = 0;
+        }
+    }
+    if (g_watcherReadyEvent && !g_watcherThread) {
+        CloseHandle(g_watcherReadyEvent);
+        g_watcherReadyEvent = nullptr;
+    }
+}
 
-void StartWatcher() {
-    if (workerRunning.exchange(true, std::memory_order_acq_rel)) return;
-    HANDLE thread = CreateThread(nullptr, 64 * 1024, Watcher, nullptr,
+bool StartWatcher() {
+    if (workerRunning.exchange(true, std::memory_order_acq_rel)) return true;
+    if (g_watcherThread) {
+        CloseHandle(g_watcherThread);
+        g_watcherThread = nullptr;
+        g_watcherThreadId = 0;
+    }
+    if (g_watcherReadyEvent) CloseHandle(g_watcherReadyEvent);
+    g_watcherReadyEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_watcherReadyEvent) {
+        workerRunning.store(false, std::memory_order_release);
+        return false;
+    }
+    g_watcherThread = CreateThread(nullptr, 64 * 1024, Watcher, g_watcherReadyEvent,
         STACK_SIZE_PARAM_IS_A_RESERVATION, &g_watcherThreadId);
-    if (thread) CloseHandle(thread);
-    else workerRunning.store(false, std::memory_order_release);
+    if (!g_watcherThread) {
+        CloseHandle(g_watcherReadyEvent);
+        g_watcherReadyEvent = nullptr;
+        g_watcherThreadId = 0;
+        workerRunning.store(false, std::memory_order_release);
+        return false;
+    }
+    WaitForSingleObject(g_watcherReadyEvent, INFINITE);
+    return true;
 }
 }
 
 void Lightency::DragDropAssist::SetEnabled(bool value) {
+    std::lock_guard<std::mutex> lock(watcherLifecycleMutex);
     enabled.store(value, std::memory_order_release);
     WriteDiagnostic("explorer", "DragDrop watcher enabled=" + std::to_string(value));
     if (value) {
-        StartWatcher();
-    } else if (g_watcherThreadId) {
-        PostThreadMessageW(g_watcherThreadId, WM_QUIT, 0, 0);
-        g_watcherThreadId = 0;
-    }
+        if (!StartWatcher()) enabled.store(false, std::memory_order_release);
+    } else StopWatcher();
 }
 
 void Lightency::DragDropAssist::UpdateTargets(void* taskbar, HWND window,
@@ -434,7 +539,8 @@ void Lightency::DragDropAssist::Remove(void* taskbar) {
 }
 
 void Lightency::DragDropAssist::Shutdown() {
-    enabled.store(false, std::memory_order_release);
-    std::lock_guard<std::mutex> lock(targetsMutex);
+    std::lock_guard<std::mutex> lifecycleLock(watcherLifecycleMutex);
+    StopWatcher();
+    std::lock_guard<std::mutex> targetsLock(targetsMutex);
     targetSets.clear();
 }

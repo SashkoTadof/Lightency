@@ -1,6 +1,9 @@
 #pragma once
 #include <windows.h>
 #include <cstdint>
+#include <cstddef>
+#include <cstring>
+#include <atomic>
 #include <string>
 
 #define WM_LIGHTENCY_APPLY (WM_APP + 0x4242)
@@ -31,48 +34,47 @@ struct WINCOMPATTRDATA {
 
 using pfnSetWindowCompositionAttribute = BOOL(WINAPI*)(HWND, WINCOMPATTRDATA*);
 
-#include <atomic>
-
 namespace Lightency {
 
 inline constexpr const wchar_t* SHARED_HOOK_CONFIG_MAPPING_NAME = L"Lightency_Shared_Config_v13";
 
 struct SharedHookConfig {
-    std::atomic<uint32_t> seq;
-
-    SharedHookConfig() = default;
-    SharedHookConfig(const SharedHookConfig& other) {
-        memcpy(this, &other, sizeof(SharedHookConfig));
-    }
-    SharedHookConfig& operator=(const SharedHookConfig& other) {
-        if (this != &other) memcpy(this, &other, sizeof(SharedHookConfig));
-        return *this;
-    }
+    volatile LONG seq = 0;
 
     void BeginWrite() {
-        uint32_t s = seq.load(std::memory_order_relaxed);
-        seq.store(s + 1, std::memory_order_release);
+        // !fixed bug: normalize a stale odd sequence left by a terminated writer.
+        const LONG current = InterlockedCompareExchange(&seq, 0, 0);
+        if (current & 1) InterlockedIncrement(&seq);
+        InterlockedIncrement(&seq);
     }
 
     void EndWrite() {
-        uint32_t s = seq.load(std::memory_order_relaxed);
-        seq.store(s + 1, std::memory_order_release);
+        InterlockedIncrement(&seq);
     }
 
-    static SharedHookConfig Read(const SharedHookConfig* mapped) {
-        if (!mapped) return {};
-        SharedHookConfig local;
-        uint32_t s1, s2;
-        do {
-            s1 = mapped->seq.load(std::memory_order_acquire);
-            if (s1 & 1) {
+    static bool Read(const SharedHookConfig* mapped, SharedHookConfig& local) {
+        if (!mapped) return false;
+        constexpr size_t payloadOffset = offsetof(SharedHookConfig, dockAnimation);
+        constexpr size_t payloadSize = sizeof(SharedHookConfig) - payloadOffset;
+        auto* mappedSequence = const_cast<LONG*>(&mapped->seq);
+        std::atomic_ref<LONG> sequence(*mappedSequence);
+        for (int attempt = 0; attempt < 64; ++attempt) {
+            const LONG before = sequence.load(std::memory_order_acquire);
+            if (before & 1) {
                 YieldProcessor();
                 continue;
             }
-            memcpy(&local, mapped, sizeof(SharedHookConfig));
-            s2 = mapped->seq.load(std::memory_order_acquire);
-        } while (s1 != s2 || (s1 & 1));
-        return local;
+            MemoryBarrier();
+            std::memcpy(reinterpret_cast<char*>(&local) + payloadOffset,
+                reinterpret_cast<const char*>(mapped) + payloadOffset, payloadSize);
+            MemoryBarrier();
+            const LONG after = sequence.load(std::memory_order_acquire);
+            if (before == after && !(after & 1)) {
+                local.seq = after;
+                return true;
+            }
+        }
+        return false;
     }
 
     bool dockAnimation = true;
@@ -118,6 +120,8 @@ inline UINT GetLightencyUpdateMsg() {
     static UINT msg = RegisterWindowMessageW(L"Lightency_UpdateHook_Msg");
     return msg;
 }
+
+inline constexpr WPARAM LIGHTENCY_HOOK_SHUTDOWN = 1;
 
 struct AppConfig {
     bool clearTaskbar = true;

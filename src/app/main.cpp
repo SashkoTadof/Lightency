@@ -10,6 +10,8 @@
 #include "window_animation.h"
 #include "border_manager.h"
 #include <string>
+#include <vector>
+#include <cstdlib>
 #include <shellapi.h>
 
 #define WINDOW_CLASS_NAME L"LightencyMainWindow"
@@ -32,6 +34,7 @@ static bool g_bQuitting = false;
 
 static void CleanShutdownAndRestoreSystem() {
     LogDebug("CleanShutdownAndRestoreSystem: start");
+    UpdateManager::Shutdown();
     BorderManager::Shutdown();
     WindowAnimation::Shutdown();
     ApplyNormalToAllTaskbars();
@@ -201,6 +204,47 @@ static void EnableDarkMode() {
     }
 }
 
+static bool GetFullPath(const std::wstring& path, std::wstring& fullPath) {
+    std::vector<wchar_t> buffer(MAX_PATH, L'\0');
+    for (;;) {
+        const DWORD length = GetFullPathNameW(path.c_str(), static_cast<DWORD>(buffer.size()),
+            buffer.data(), nullptr);
+        if (!length) return false;
+        if (length < buffer.size()) {
+            fullPath.assign(buffer.data(), length);
+            return true;
+        }
+        if (length >= 32768) return false;
+        buffer.resize(static_cast<size_t>(length) + 1, L'\0');
+    }
+}
+
+static bool IsGeneratedUpdateDirectory(const std::wstring& candidate) {
+    if (candidate.empty()) return false;
+    std::vector<wchar_t> tempBuffer(MAX_PATH, L'\0');
+    std::wstring tempPath;
+    for (;;) {
+        const DWORD length = GetTempPathW(static_cast<DWORD>(tempBuffer.size()), tempBuffer.data());
+        if (!length || length >= 32768) return false;
+        if (length < tempBuffer.size()) {
+            tempPath.assign(tempBuffer.data(), length);
+            break;
+        }
+        tempBuffer.resize(static_cast<size_t>(length) + 1, L'\0');
+    }
+
+    std::wstring fullTemp, fullCandidate;
+    if (!GetFullPath(tempPath, fullTemp) || !GetFullPath(candidate, fullCandidate)) return false;
+    if (fullTemp.empty() || fullCandidate.size() <= fullTemp.size()) return false;
+    if (fullTemp.back() != L'\\' && fullTemp.back() != L'/') fullTemp.push_back(L'\\');
+    if (fullCandidate.size() <= fullTemp.size() ||
+        _wcsnicmp(fullCandidate.c_str(), fullTemp.c_str(), fullTemp.size()) != 0) return false;
+
+    const std::wstring leaf = fullCandidate.substr(fullTemp.size());
+    return leaf.rfind(L"LightencyUpdate_", 0) == 0 &&
+        leaf.find_first_of(L"\\/") == std::wstring::npos;
+}
+
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
     LogDebug("wWinMain: start");
     DisableProcessWindowsGhosting();
@@ -210,6 +254,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
     bool bDaemon = false;
     bool bCheckUpdates = false;
     std::wstring cleanupDir;
+    bool applyUpdateRequested = false;
+    std::wstring applyUpdateTempDir;
+    DWORD applyUpdateOwnerPid = 0;
+    std::wstring applyUpdateTargetExe;
 
     int argc = 0;
     if (LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc)) {
@@ -218,40 +266,58 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
             if (arg == L"--quit" || arg == L"-q") bQuit = true;
             else if (arg == L"--daemon" || arg == L"-d") bDaemon = true;
             else if (arg == L"--check-updates" || arg == L"-u") bCheckUpdates = true;
-            else if (arg == L"--cleanup-update" && i + 1 < argc) {
+            else if (arg == L"--apply-update") {
+                applyUpdateRequested = true;
+                if (i + 3 < argc) {
+                    applyUpdateTempDir = argv[++i];
+                    const wchar_t* pidText = argv[++i];
+                    wchar_t* end = nullptr;
+                    const unsigned long parsedPid = std::wcstoul(pidText, &end, 10);
+                    if (pidText[0] >= L'0' && pidText[0] <= L'9' && end && end != pidText &&
+                        *end == L'\0' && parsedPid > 0 && parsedPid <= MAXDWORD)
+                        applyUpdateOwnerPid = static_cast<DWORD>(parsedPid);
+                    applyUpdateTargetExe = argv[++i];
+                }
+            } else if (arg == L"--cleanup-update" && i + 1 < argc) {
                 cleanupDir = argv[++i];
             }
         }
         LocalFree(argv);
     }
 
-    if (!cleanupDir.empty()) {
+    if (applyUpdateRequested) {
+        std::wstring errorMessage;
+        if (!UpdateManager::ApplyStagedUpdate(applyUpdateTempDir, applyUpdateOwnerPid,
+                applyUpdateTargetExe, errorMessage)) {
+            MessageBoxW(nullptr, errorMessage.c_str(), L"Lightency Update", MB_OK | MB_ICONERROR);
+            return 1;
+        }
+        return 0;
+    }
+
+    if (IsGeneratedUpdateDirectory(cleanupDir)) {
         Sleep(1500);
-        
         wchar_t currentExePath[MAX_PATH]{};
-        GetModuleFileNameW(nullptr, currentExePath, MAX_PATH);
-        std::wstring currentExe(currentExePath);
-        size_t lastSlash = currentExe.find_last_of(L"\\/");
-        if (lastSlash != std::wstring::npos) {
-            std::wstring targetDir = currentExe.substr(0, lastSlash);
-            WIN32_FIND_DATAW fd;
-            HANDLE hFind = FindFirstFileW((targetDir + L"\\*.old*").c_str(), &fd);
-            if (hFind != INVALID_HANDLE_VALUE) {
-                do {
-                    DeleteFileW((targetDir + L"\\" + fd.cFileName).c_str());
-                } while (FindNextFileW(hFind, &fd));
-                FindClose(hFind);
+        const DWORD currentPathLength = GetModuleFileNameW(nullptr, currentExePath,
+            ARRAYSIZE(currentExePath));
+        if (currentPathLength && currentPathLength < ARRAYSIZE(currentExePath)) {
+            const std::wstring currentExe(currentExePath);
+            const size_t lastSlash = currentExe.find_last_of(L"\\/");
+            if (lastSlash != std::wstring::npos) {
+                const std::wstring targetDir = currentExe.substr(0, lastSlash);
+                DeleteFileW((targetDir + L"\\lightency.exe.old").c_str());
+                DeleteFileW((targetDir + L"\\lightency_hook.dll.old").c_str());
             }
         }
 
-        if (cleanupDir.size() > 5 && cleanupDir.find(L"LightencyUpdate_") != std::wstring::npos) {
-            SHFILEOPSTRUCTW fileOp{};
-            std::wstring doubleNullPath = cleanupDir + L'\0';
-            fileOp.wFunc = FO_DELETE;
-            fileOp.pFrom = doubleNullPath.c_str();
-            fileOp.fFlags = FOF_NO_UI | FOF_NOCONFIRMATION | FOF_SILENT;
-            SHFileOperationW(&fileOp);
-        }
+        SHFILEOPSTRUCTW fileOp{};
+        std::wstring doubleNullPath = cleanupDir;
+        doubleNullPath.push_back(L'\0');
+        doubleNullPath.push_back(L'\0');
+        fileOp.wFunc = FO_DELETE;
+        fileOp.pFrom = doubleNullPath.c_str();
+        fileOp.fFlags = FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT;
+        SHFileOperationW(&fileOp);
     }
 
     HANDLE hMutex = CreateMutexW(nullptr, TRUE, L"Lightency_SingleInstance_Mutex");
@@ -330,12 +396,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int) {
     }
 
     LogDebug("wWinMain: entering message loop");
-    MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0)) {
+    MSG msg{};
+    BOOL messageResult = 0;
+    while ((messageResult = GetMessageW(&msg, nullptr, 0, 0)) > 0) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
 
     LogDebug("wWinMain: exit");
+    UpdateManager::Shutdown();
+    if (messageResult == -1) return static_cast<int>(GetLastError());
     return static_cast<int>(msg.wParam);
 }

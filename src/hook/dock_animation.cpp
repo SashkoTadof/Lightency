@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <thread>
+#include <atomic>
 #include <uiautomation.h>
 #include "../common/diagnostics.h"
 
@@ -19,6 +20,9 @@ static inline void LogDock(const std::wstring&) {}
 static Lightency::SharedHookConfig g_lightencyDockConfig;
 static HANDLE s_hConfigMap = NULL;
 static Lightency::SharedHookConfig* s_pLiveSharedConfig = nullptr;
+static std::atomic<DWORD> s_checkedOwnerPid{0};
+static std::atomic<ULONGLONG> s_lastOwnerCheck{0};
+static std::atomic<bool> s_ownerUnavailable{false};
 static void RestoreDefaultLayout();
 static void DockEngine_ApplySettings();
 
@@ -42,33 +46,45 @@ static void EnsureLiveConfigMapped() {
         }
     }
     if (s_pLiveSharedConfig) {
-        bool shouldDisable = false;
-        if (s_pLiveSharedConfig->masterPid != 0 && !IsProcessAlive(s_pLiveSharedConfig->masterPid)) {
-            shouldDisable = true;
+        Lightency::SharedHookConfig liveConfig;
+        if (!Lightency::SharedHookConfig::Read(s_pLiveSharedConfig, liveConfig)) return;
+
+        const ULONGLONG now = GetTickCount64();
+        const DWORD ownerPid = liveConfig.masterPid;
+        const DWORD checkedOwnerPid = s_checkedOwnerPid.load(std::memory_order_relaxed);
+        const ULONGLONG lastOwnerCheck = s_lastOwnerCheck.load(std::memory_order_relaxed);
+        if (ownerPid != checkedOwnerPid || now - lastOwnerCheck >= 1000) {
+            s_ownerUnavailable.store(ownerPid != 0 && !IsProcessAlive(ownerPid),
+                std::memory_order_relaxed);
+            s_checkedOwnerPid.store(ownerPid, std::memory_order_relaxed);
+            s_lastOwnerCheck.store(now, std::memory_order_relaxed);
         }
-        bool newDockAnim = shouldDisable ? false : s_pLiveSharedConfig->dockAnimation;
+        const bool shouldDisable = ownerPid != 0 &&
+            s_checkedOwnerPid.load(std::memory_order_relaxed) == ownerPid &&
+            s_ownerUnavailable.load(std::memory_order_relaxed);
+        const bool newDockAnim = shouldDisable ? false : liveConfig.dockAnimation;
         bool newLayoutEditor = false;
 
-        if (s_pLiveSharedConfig->maxScale != g_lightencyDockConfig.maxScale ||
-            s_pLiveSharedConfig->effectRadius != g_lightencyDockConfig.effectRadius ||
-            s_pLiveSharedConfig->spacingFactor != g_lightencyDockConfig.spacingFactor ||
-            s_pLiveSharedConfig->disableBounce != g_lightencyDockConfig.disableBounce ||
-            s_pLiveSharedConfig->excludeSystemButtons != g_lightencyDockConfig.excludeSystemButtons ||
-            s_pLiveSharedConfig->autoPhysics != g_lightencyDockConfig.autoPhysics ||
-            s_pLiveSharedConfig->trayItems != g_lightencyDockConfig.trayItems ||
-            s_pLiveSharedConfig->hideTrayChevron != g_lightencyDockConfig.hideTrayChevron ||
-            s_pLiveSharedConfig->hideTrayLanguage != g_lightencyDockConfig.hideTrayLanguage ||
-            s_pLiveSharedConfig->hideTrayNetwork != g_lightencyDockConfig.hideTrayNetwork ||
-            s_pLiveSharedConfig->hideTrayVolume != g_lightencyDockConfig.hideTrayVolume ||
-            s_pLiveSharedConfig->hideTrayBattery != g_lightencyDockConfig.hideTrayBattery ||
-            s_pLiveSharedConfig->hideTrayClock != g_lightencyDockConfig.hideTrayClock ||
-            s_pLiveSharedConfig->clearTaskbar != g_lightencyDockConfig.clearTaskbar ||
-            s_pLiveSharedConfig->hideTaskbarBorder != g_lightencyDockConfig.hideTaskbarBorder ||
-            s_pLiveSharedConfig->dragDropAssist != g_lightencyDockConfig.dragDropAssist ||
+        if (liveConfig.maxScale != g_lightencyDockConfig.maxScale ||
+            liveConfig.effectRadius != g_lightencyDockConfig.effectRadius ||
+            liveConfig.spacingFactor != g_lightencyDockConfig.spacingFactor ||
+            liveConfig.disableBounce != g_lightencyDockConfig.disableBounce ||
+            liveConfig.excludeSystemButtons != g_lightencyDockConfig.excludeSystemButtons ||
+            liveConfig.autoPhysics != g_lightencyDockConfig.autoPhysics ||
+            liveConfig.trayItems != g_lightencyDockConfig.trayItems ||
+            liveConfig.hideTrayChevron != g_lightencyDockConfig.hideTrayChevron ||
+            liveConfig.hideTrayLanguage != g_lightencyDockConfig.hideTrayLanguage ||
+            liveConfig.hideTrayNetwork != g_lightencyDockConfig.hideTrayNetwork ||
+            liveConfig.hideTrayVolume != g_lightencyDockConfig.hideTrayVolume ||
+            liveConfig.hideTrayBattery != g_lightencyDockConfig.hideTrayBattery ||
+            liveConfig.hideTrayClock != g_lightencyDockConfig.hideTrayClock ||
+            liveConfig.clearTaskbar != g_lightencyDockConfig.clearTaskbar ||
+            liveConfig.hideTaskbarBorder != g_lightencyDockConfig.hideTaskbarBorder ||
+            liveConfig.dragDropAssist != g_lightencyDockConfig.dragDropAssist ||
             newLayoutEditor != g_lightencyDockConfig.layoutEditor ||
             newDockAnim != g_lightencyDockConfig.dockAnimation) {
             bool layoutToggledOff = (g_lightencyDockConfig.layoutEditor && !newLayoutEditor);
-            g_lightencyDockConfig = Lightency::SharedHookConfig::Read(s_pLiveSharedConfig);
+            g_lightencyDockConfig = liveConfig;
             g_lightencyDockConfig.dockAnimation = newDockAnim;
             g_lightencyDockConfig.layoutEditor = newLayoutEditor;
             if (layoutToggledOff) {
@@ -222,7 +238,7 @@ static void ApplyTaskbarAppearance(FrameworkElement const& taskbarElement) {
                              name == L"HoverBorder" || name == L"FocusBorder" ||
                              name == L"SelectionBorder" ||
                              (!name.empty() && name.find(L"Stroke") != std::wstring::npos));
-            const bool isFill = (name == L"BackgroundFill" || 
+            const bool isFill = (name == L"BackgroundFill" ||
                                  (!isStroke && !name.empty() && name.find(L"Background") != std::wstring::npos));
 
 
@@ -934,7 +950,7 @@ static void ApplyTrayItemVisibility(FrameworkElement const& taskbarElement) {
                 void* key = winrt::get_abi(element);
                 auto [it, inserted] = g_trayVisibilityStates.try_emplace(
                     key, TrayVisibilityState{ element, false });
-                
+
                 if (hide) {
                     if (!it->second.currentlyHiddenByUs || element.Visibility() != Visibility::Collapsed) {
                         element.Visibility(Visibility::Collapsed);
@@ -2182,8 +2198,6 @@ void DockAnimation::AttachXamlElement(IUnknown* object) {
                 auto frame = weak.get();
                 if (!frame) return;
                 EnsureLiveConfigMapped();
-                ApplyTaskbarAppearance(frame);
-                ApplyTrayItemVisibility(frame);
                 if (taskbar && g_lightencyDockConfig.dockAnimation) {
                     HandleSessionPointerMoved(key, args);
                 } else if (taskbar) {
@@ -2239,8 +2253,12 @@ void DockAnimation::AttachXamlElement(IUnknown* object) {
 }
 
 bool DockAnimation::Initialize() {
+    if (!XamlBridge::Initialize()) {
+        Lightency::DragDropAssist::Shutdown();
+        return false;
+    }
     Lightency::DragDropAssist::SetEnabled(g_lightencyDockConfig.dragDropAssist);
-    return XamlBridge::Initialize();
+    return true;
 }
 
 void DockAnimation::Shutdown() {

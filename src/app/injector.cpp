@@ -5,11 +5,13 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <mutex>
 #include <tlhelp32.h>
 
 namespace Lightency {
 
 namespace {
+    std::recursive_mutex g_injectorMutex;
     std::vector<HHOOK> g_startMenuThreadHooks;
     std::vector<DWORD> g_startMenuThreadIds;
     DWORD g_startMenuHostPid = 0;
@@ -17,6 +19,13 @@ namespace {
         DWORD_PTR result = 0;
         SendMessageTimeoutW(taskbar, msg, wParam, lParam,
                             SMTO_ABORTIFHUNG | SMTO_BLOCK, 250, &result);
+    }
+
+    void NotifyStartMenuShutdown(HWND window) {
+        if (!window || !IsWindow(window)) return;
+        DWORD_PTR result = 0;
+        SendMessageTimeoutW(window, GetLightencyUpdateMsg(), LIGHTENCY_HOOK_SHUTDOWN, 0,
+            SMTO_ABORTIFHUNG | SMTO_BLOCK, 500, &result);
     }
 
     void BroadcastToTaskbars(UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -240,6 +249,8 @@ bool Injector::InstallStartMenuHook() {
         LogDebug("InstallStartMenuHook: host thread not found");
         return false;
     }
+    if (s_hStartMenuHook || !g_startMenuThreadHooks.empty())
+        NotifyStartMenuShutdown(s_hStartMenuWindow);
     if (s_hStartMenuHook) UnhookWindowsHookEx(s_hStartMenuHook);
     s_hStartMenuHook = nullptr;
     for (HHOOK hook : g_startMenuThreadHooks) UnhookWindowsHookEx(hook);
@@ -279,13 +290,18 @@ bool Injector::InstallStartMenuHook() {
 }
 
 bool Injector::EnsureStartMenuHook() {
+    std::lock_guard<std::recursive_mutex> lock(g_injectorMutex);
     if (!s_pSharedMemory) return false;
-    auto* pCfg = static_cast<const SharedHookConfig*>(s_pSharedMemory);
-    const bool needsHook = pCfg->startMenuSizing ||
-        pCfg->startHideSearch || pCfg->startHidePinned || pCfg->startHideRecommended ||
-        pCfg->startHideProfile || pCfg->startHidePower || pCfg->startHideViewSelector ||
-        pCfg->startHideFolders;
+    SharedHookConfig config;
+    if (!SharedHookConfig::Read(static_cast<const SharedHookConfig*>(s_pSharedMemory), config))
+        return false;
+    const bool needsHook = config.startMenuSizing ||
+        config.startHideSearch || config.startHidePinned || config.startHideRecommended ||
+        config.startHideProfile || config.startHidePower || config.startHideViewSelector ||
+        config.startHideFolders;
     if (!needsHook) {
+        if (s_hStartMenuHook || !g_startMenuThreadHooks.empty())
+            NotifyStartMenuShutdown(s_hStartMenuWindow);
         if (s_hStartMenuHook) {
             UnhookWindowsHookEx(s_hStartMenuHook);
             s_hStartMenuHook = nullptr;
@@ -299,11 +315,12 @@ bool Injector::EnsureStartMenuHook() {
         return false;
     }
     const bool hooked = InstallStartMenuHook();
-    const bool resized = ApplyStartAndSearchFrameSize(pCfg);
+    const bool resized = ApplyStartAndSearchFrameSize(&config);
     return hooked || resized;
 }
 
 bool Injector::Initialize() {
+    std::lock_guard<std::recursive_mutex> lock(g_injectorMutex);
     LogDebug("Injector::Initialize start");
     if (!s_hMapFile) {
         s_hMapFile = CreateFileMappingW(
@@ -314,7 +331,9 @@ bool Injector::Initialize() {
             s_pSharedMemory = MapViewOfFile(s_hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedHookConfig));
             if (s_pSharedMemory) {
                 auto* pCfg = static_cast<SharedHookConfig*>(s_pSharedMemory);
+                pCfg->BeginWrite();
                 pCfg->masterPid = GetCurrentProcessId();
+                pCfg->EndWrite();
             }
         }
     }
@@ -331,6 +350,7 @@ bool Injector::Initialize() {
 }
 
 void Injector::Shutdown() {
+    std::lock_guard<std::recursive_mutex> lock(g_injectorMutex);
     if (s_pSharedMemory) {
         auto* pCfg = static_cast<SharedHookConfig*>(s_pSharedMemory);
         pCfg->BeginWrite();
@@ -343,7 +363,8 @@ void Injector::Shutdown() {
     BroadcastToTaskbars(Lightency::GetLightencyUpdateMsg(), 0, 0);
     if (s_hStartMenuWindow) {
         DWORD_PTR res = 0;
-        SendMessageTimeoutW(s_hStartMenuWindow, Lightency::GetLightencyUpdateMsg(), 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 200, &res);
+        SendMessageTimeoutW(s_hStartMenuWindow, Lightency::GetLightencyUpdateMsg(),
+            LIGHTENCY_HOOK_SHUTDOWN, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 500, &res);
     }
 
     if (s_hExplorerHook) {
@@ -376,6 +397,9 @@ void Injector::Shutdown() {
 }
 
 void Injector::Invalidate() {
+    std::lock_guard<std::recursive_mutex> lock(g_injectorMutex);
+    if (s_hStartMenuHook || !g_startMenuThreadHooks.empty())
+        NotifyStartMenuShutdown(s_hStartMenuWindow);
     if (s_hExplorerHook) {
         UnhookWindowsHookEx(s_hExplorerHook);
         s_hExplorerHook = nullptr;
@@ -401,6 +425,7 @@ void Injector::Invalidate() {
 }
 
 void Injector::Update(const AppConfig& config) {
+    std::lock_guard<std::recursive_mutex> lock(g_injectorMutex);
     LogDebug("Injector::Update start");
     LogDebug("Settings clear=" + std::to_string(config.clearTaskbar) +
         " dock=" + std::to_string(config.dockAnimation) +
