@@ -422,11 +422,11 @@ enum class HideKind { None, Search, Pinned, Recommended, Profile, Power, ViewSel
 HideKind ClassifyElement(const FrameworkElement& element) {
     const auto name = std::wstring(element.Name());
     const auto cls = std::wstring(winrt::get_class_name(element));
-
+    
     auto hasAny = [&](std::initializer_list<std::wstring_view> words) {
         return ContainsAny(name, words) || ContainsAny(cls, words);
     };
-
+    
     if (hasAny({L"SearchBox"})) return HideKind::Search;
     if (hasAny({L"Pinned"})) return HideKind::Pinned;
     if (hasAny({L"Suggestion"})) return HideKind::Recommended;
@@ -434,9 +434,9 @@ HideKind ClassifyElement(const FrameworkElement& element) {
     if (hasAny({L"PowerOption", L"PowerButton"})) return HideKind::Power;
     if (hasAny({L"ViewSelection", L"AllListHeading"})) return HideKind::ViewSelector;
     if (hasAny({L"SystemPlaces", L"FoldersList", L"SystemFolders", L"PlacesView", L"PlaceList", L"PlacesContainer", L"QuickActions", L"NavigationPanePlaces"})) return HideKind::Folders;
-
+    
     if (hasAny({L"BottomStrip", L"Footer", L"BottomPanel", L"NavPanePlaceholder", L"NavigationPaneView"})) return HideKind::Footer;
-
+    
     return HideKind::None;
 }
 
@@ -486,7 +486,7 @@ void DumpVisualTree(const FrameworkElement&) {
 
 void ApplyHiddenElements(FrameworkElement root) {
     DumpVisualTree(root);
-
+    
     uint32_t mask = 0;
     if (g_settings.hideSearch) mask |= 1u << 0;
     if (g_settings.hidePinned) mask |= 1u << 1;
@@ -687,32 +687,28 @@ bool Load() {
     if (!mapping) return false;
     auto* config = static_cast<SharedHookConfig*>(MapViewOfFile(mapping,
         FILE_MAP_READ, 0, 0, sizeof(SharedHookConfig)));
-    bool read = false;
     if (config) {
-        SharedHookConfig cfg;
-        read = SharedHookConfig::Read(config, cfg);
-        if (read) {
-            g_settings.enabled = cfg.startMenuSizing;
-            g_settings.layoutEditor = false;
-            g_settings.hideSearch = cfg.startHideSearch;
-            g_settings.hidePinned = cfg.startHidePinned;
-            g_settings.hideRecommended = cfg.startHideRecommended;
-            g_settings.hideProfile = cfg.startHideProfile;
-            g_settings.hidePower = cfg.startHidePower;
-            g_settings.hideViewSelector = cfg.startHideViewSelector;
-            g_settings.hideFolders = cfg.startHideFolders;
-            if (IsSearchHost()) {
-                g_settings.width = cfg.searchWidth;
-                g_settings.height = cfg.searchHeight;
-            } else {
-                g_settings.width = cfg.startMenuWidth;
-                g_settings.height = cfg.startMenuHeight;
-            }
+        SharedHookConfig cfg = SharedHookConfig::Read(config);
+        g_settings.enabled = cfg.startMenuSizing;
+        g_settings.layoutEditor = false;
+        g_settings.hideSearch = cfg.startHideSearch;
+        g_settings.hidePinned = cfg.startHidePinned;
+        g_settings.hideRecommended = cfg.startHideRecommended;
+        g_settings.hideProfile = cfg.startHideProfile;
+        g_settings.hidePower = cfg.startHidePower;
+        g_settings.hideViewSelector = cfg.startHideViewSelector;
+        g_settings.hideFolders = cfg.startHideFolders;
+        if (IsSearchHost()) {
+            g_settings.width = cfg.searchWidth;
+            g_settings.height = cfg.searchHeight;
+        } else {
+            g_settings.width = cfg.startMenuWidth;
+            g_settings.height = cfg.startMenuHeight;
         }
         UnmapViewOfFile(config);
     }
     CloseHandle(mapping);
-    return read;
+    return config != nullptr;
 }
 }
 

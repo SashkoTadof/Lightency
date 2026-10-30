@@ -90,18 +90,19 @@ winrt::Windows::UI::Color TransformColor(winrt::Windows::UI::Color source, const
     return HslToRgb(hsl, source.A);
 }
 
-bool GetCurrentHookConfig(SharedHookConfig& config) {
+SharedHookConfig GetCurrentHookConfig() {
     HANDLE hMap = OpenFileMappingW(FILE_MAP_READ, FALSE, SHARED_HOOK_CONFIG_MAPPING_NAME);
-    if (!hMap) return false;
-    auto* p = static_cast<SharedHookConfig*>(MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, sizeof(SharedHookConfig)));
-    if (!p) {
+    if (hMap) {
+        auto* p = static_cast<SharedHookConfig*>(MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, sizeof(SharedHookConfig)));
+        if (p) {
+            SharedHookConfig cfg = SharedHookConfig::Read(p);
+            UnmapViewOfFile(p);
+            CloseHandle(hMap);
+            return cfg;
+        }
         CloseHandle(hMap);
-        return false;
     }
-    const bool read = SharedHookConfig::Read(p, config);
-    UnmapViewOfFile(p);
-    CloseHandle(hMap);
-    return read;
+    return SharedHookConfig{};
 }
 
 std::mutex g_mutex;
@@ -300,8 +301,7 @@ void AttachTaskbar(IUnknown* taskbarFrame) {
         g_trackedStartButton = winrt::make_weak(startButton);
         g_trackedIcon = winrt::make_weak(icon);
 
-        SharedHookConfig currentConfig;
-        if (GetCurrentHookConfig(currentConfig)) g_cachedConfig = currentConfig;
+        g_cachedConfig = GetCurrentHookConfig();
         ApplyStyleInternal(icon, g_cachedConfig);
 
         icon.Loaded([](winrt::Windows::Foundation::IInspectable const& sender, RoutedEventArgs const&) {
@@ -355,8 +355,8 @@ void UpdateSettings(const SharedHookConfig& config) {
 }
 
 void RefreshSettings() {
-    SharedHookConfig config;
-    if (GetCurrentHookConfig(config)) UpdateSettings(config);
+    const SharedHookConfig cfg = GetCurrentHookConfig();
+    UpdateSettings(cfg);
 }
 
 void Shutdown() {

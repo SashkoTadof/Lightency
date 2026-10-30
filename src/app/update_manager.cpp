@@ -5,8 +5,6 @@
 #include "injector.h"
 #include "branded_dialog.h"
 #include "icon_gen.h"
-#include "window_animation.h"
-#include "border_manager.h"
 #include "../common/types.h"
 #include "../common/composition.h"
 #include <windows.h>
@@ -23,7 +21,6 @@
 #include <atomic>
 #include <functional>
 #include <algorithm>
-#include <cmath>
 #include <sstream>
 #include <iomanip>
 #include <winrt/Windows.Foundation.h>
@@ -42,7 +39,6 @@ constexpr UINT WM_UPDATE_PROGRESS = WM_USER + 301;
 constexpr UINT WM_UPDATE_STATUS   = WM_USER + 302;
 constexpr UINT WM_UPDATE_FAILED   = WM_USER + 303;
 constexpr UINT WM_UPDATE_READY    = WM_USER + 304;
-constexpr uint64_t kMaxUpdateArchiveBytes = 512ull * 1024 * 1024;
 
 std::atomic<bool> g_checkRunning{ false };
 
@@ -434,7 +430,7 @@ bool ParseReleaseInfo(const std::string& jsonString, ReleaseInfo& info) {
         if (root.HasKey(L"name")) info.name = root.GetNamedString(L"name").c_str();
         if (root.HasKey(L"body")) info.body = ExtractChanges(std::wstring(root.GetNamedString(L"body").c_str()));
         if (root.HasKey(L"html_url")) info.htmlUrl = root.GetNamedString(L"html_url").c_str();
-
+        
         if (info.htmlUrl.empty()) info.htmlUrl = L"https://github.com/SashkoTadof/Lightency/releases/latest";
         if (info.name.empty()) info.name = L"Lightency " + info.tag;
 
@@ -445,24 +441,16 @@ bool ParseReleaseInfo(const std::string& jsonString, ReleaseInfo& info) {
                 if (asset.HasKey(L"name") && asset.HasKey(L"browser_download_url")) {
                     std::wstring name = asset.GetNamedString(L"name").c_str();
                     std::wstring url = asset.GetNamedString(L"browser_download_url").c_str();
-
+                    
                     if (name.find(L"Lightency") != std::wstring::npos &&
                         name.find(L"symbols") == std::wstring::npos &&
                         name.find(L"source") == std::wstring::npos &&
                         name.size() >= 4 && name.substr(name.size() - 4) == L".zip") {
-
-                        uint64_t assetSize = 0;
-                        if (asset.HasKey(L"size")) {
-                            const double reportedSize = asset.GetNamedNumber(L"size");
-                            if (!std::isfinite(reportedSize) || reportedSize < 0 ||
-                                std::floor(reportedSize) != reportedSize ||
-                                reportedSize > static_cast<double>(kMaxUpdateArchiveBytes)) continue;
-                            assetSize = static_cast<uint64_t>(reportedSize);
-                        }
-                        if (url.empty()) continue;
-
+                        
                         info.zipUrl = url;
-                        info.zipSize = assetSize;
+                        if (asset.HasKey(L"size")) {
+                            info.zipSize = static_cast<uint64_t>(asset.GetNamedNumber(L"size"));
+                        }
                         break;
                     }
                 }
@@ -505,41 +493,22 @@ void MarkChecked() {
 }
 
 std::wstring GetTempUpdateDir() {
-    std::vector<wchar_t> tempPath(MAX_PATH, L'\0');
-    for (;;) {
-        const DWORD length = GetTempPathW(static_cast<DWORD>(tempPath.size()), tempPath.data());
-        if (!length) return {};
-        if (length < tempPath.size()) break;
-        if (length > 32768) return {};
-        tempPath.resize(length, L'\0');
-    }
+    wchar_t tempPath[MAX_PATH];
+    GetTempPathW(MAX_PATH, tempPath);
+    
+    GUID guid;
+    CoCreateGuid(&guid);
+    wchar_t guidStr[40];
+    StringFromGUID2(guid, guidStr, 40);
 
-    GUID guid{};
-    if (FAILED(CoCreateGuid(&guid))) return {};
-    wchar_t guidStr[40]{};
-    if (!StringFromGUID2(guid, guidStr, ARRAYSIZE(guidStr))) return {};
-
-    std::wstring dir = std::wstring(tempPath.data()) + L"LightencyUpdate_" + guidStr;
-    if (!CreateDirectoryW(dir.c_str(), nullptr)) return {};
+    std::wstring dir = std::wstring(tempPath) + L"LightencyUpdate_" + guidStr;
+    CreateDirectoryW(dir.c_str(), nullptr);
     return dir;
-}
-
-void DeleteUpdateDirectory(const std::wstring& path) {
-    if (path.empty()) return;
-    std::wstring from = path;
-    from.push_back(L'\0');
-    from.push_back(L'\0');
-    SHFILEOPSTRUCTW operation{};
-    operation.wFunc = FO_DELETE;
-    operation.pFrom = from.c_str();
-    operation.fFlags = FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT;
-    SHFileOperationW(&operation);
 }
 
 bool DownloadFile(const std::wstring& url, const std::wstring& destPath, uint64_t expectedSize,
                   std::function<void(uint64_t downloaded, uint64_t total)> progressCallback,
                   std::atomic<bool>& cancelFlag) {
-    if (expectedSize > kMaxUpdateArchiveBytes) return false;
     URL_COMPONENTS urlComp{};
     urlComp.dwStructSize = sizeof(urlComp);
     wchar_t hostName[256]{};
@@ -565,9 +534,8 @@ bool DownloadFile(const std::wstring& url, const std::wstring& destPath, uint64_
         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags) };
     if (!request.value) return false;
 
-    DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
-    if (!WinHttpSetOption(request.value, WINHTTP_OPTION_REDIRECT_POLICY,
-            &redirectPolicy, sizeof(redirectPolicy))) return false;
+    DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+    WinHttpSetOption(request.value, WINHTTP_OPTION_REDIRECT_POLICY, &redirectPolicy, sizeof(redirectPolicy));
 
     const wchar_t headers[] = L"User-Agent: Lightency\r\n";
     if (!WinHttpSendRequest(request.value, headers, static_cast<DWORD>(-1), nullptr, 0, 0, 0) ||
@@ -581,11 +549,8 @@ bool DownloadFile(const std::wstring& url, const std::wstring& destPath, uint64_
     uint64_t totalBytes = expectedSize;
     if (WinHttpQueryHeaders(request.value, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
                             nullptr, &contentLength, &clSize, nullptr)) {
-        if (contentLength > kMaxUpdateArchiveBytes ||
-            (expectedSize > 0 && contentLength != expectedSize)) return false;
         if (totalBytes == 0) totalBytes = contentLength;
     }
-    if (totalBytes > kMaxUpdateArchiveBytes) return false;
 
     HANDLE hFile = CreateFileW(destPath.c_str(), GENERIC_WRITE, 0, nullptr,
                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -605,13 +570,6 @@ bool DownloadFile(const std::wstring& url, const std::wstring& destPath, uint64_
         if (!WinHttpReadData(request.value, buffer.data(), toRead, &readBytes)) { success = false; break; }
         if (readBytes == 0) break;
 
-        if (downloaded > kMaxUpdateArchiveBytes - readBytes ||
-            (totalBytes > 0 && (downloaded > totalBytes ||
-                static_cast<uint64_t>(readBytes) > totalBytes - downloaded))) {
-            success = false;
-            break;
-        }
-
         DWORD written = 0;
         if (!WriteFile(hFile, buffer.data(), readBytes, &written, nullptr) || written != readBytes) {
             success = false;
@@ -623,9 +581,9 @@ bool DownloadFile(const std::wstring& url, const std::wstring& destPath, uint64_
     }
 
     CloseHandle(hFile);
-
-    if (success && !cancelFlag && totalBytes > 0) {
-        if (downloaded != totalBytes) success = false;
+    
+    if (success && !cancelFlag && expectedSize > 0) {
+        if (downloaded != expectedSize) success = false;
     }
 
     if (cancelFlag || !success) {
@@ -660,24 +618,13 @@ std::wstring FindExecutableInDir(const std::wstring& rootDir) {
     return foundDir;
 }
 
-bool ExecuteUpdatePayload(const std::wstring& zipPath, const std::wstring& tempDir,
-                          std::wstring& errorMsg) {
-    if (tempDir.empty()) {
-        errorMsg = L"Could not create a temporary update directory.";
-        return false;
-    }
-    const std::wstring extractDir = tempDir + L"\\extracted";
-    if (!CreateDirectoryW(extractDir.c_str(), nullptr)) {
-        errorMsg = L"Could not create the update extraction directory.";
-        return false;
-    }
+bool ExecuteUpdatePayload(const std::wstring& zipPath, std::wstring& errorMsg) {
+    std::wstring tempDir = GetTempUpdateDir();
+    std::wstring extractDir = tempDir + L"\\extracted";
+    CreateDirectoryW(extractDir.c_str(), nullptr);
 
     wchar_t sysDir[MAX_PATH]{};
-    const UINT sysDirLength = GetSystemDirectoryW(sysDir, ARRAYSIZE(sysDir));
-    if (!sysDirLength || sysDirLength >= ARRAYSIZE(sysDir)) {
-        errorMsg = L"Could not locate the Windows system directory.";
-        return false;
-    }
+    GetSystemDirectoryW(sysDir, MAX_PATH);
     std::wstring tarCmd = std::wstring(sysDir) + L"\\tar.exe -xf \"" + zipPath + L"\" -C \"" + extractDir + L"\"";
     STARTUPINFOW siTar{ sizeof(siTar) };
     PROCESS_INFORMATION piTar{};
@@ -691,325 +638,96 @@ bool ExecuteUpdatePayload(const std::wstring& zipPath, const std::wstring& tempD
         errorMsg = L"Failed to launch extraction utility (tar.exe).";
         return false;
     }
-    const DWORD tarWait = WaitForSingleObject(piTar.hProcess, 30000);
-    if (tarWait != WAIT_OBJECT_0) {
-        const DWORD waitError = tarWait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
-        TerminateProcess(piTar.hProcess, waitError);
-        WaitForSingleObject(piTar.hProcess, INFINITE);
-        CloseHandle(piTar.hProcess);
-        CloseHandle(piTar.hThread);
-        errorMsg = tarWait == WAIT_TIMEOUT
-            ? L"Update extraction timed out."
-            : L"Could not wait for update extraction to finish (error " +
-                std::to_wstring(waitError) + L").";
-        return false;
-    }
+    WaitForSingleObject(piTar.hProcess, 30000);
     DWORD tarExit = 0;
-    const bool gotExitCode = GetExitCodeProcess(piTar.hProcess, &tarExit) != FALSE;
-    const DWORD exitQueryError = gotExitCode ? ERROR_SUCCESS : GetLastError();
+    GetExitCodeProcess(piTar.hProcess, &tarExit);
     CloseHandle(piTar.hProcess);
     CloseHandle(piTar.hThread);
 
-    if (!gotExitCode || tarExit != 0) {
-        errorMsg = L"Extraction failed with code " +
-            std::to_wstring(gotExitCode ? tarExit : exitQueryError);
+    if (tarExit != 0) {
+        errorMsg = L"Extraction failed with code " + std::to_wstring(tarExit);
         return false;
     }
 
-    const std::wstring sourceDir = FindExecutableInDir(extractDir);
+    std::wstring sourceDir = FindExecutableInDir(extractDir);
     if (sourceDir.empty()) {
         errorMsg = L"Updated lightency.exe was not found inside the release archive.";
         return false;
     }
-    const std::wstring sourceExe = sourceDir + L"\\lightency.exe";
-    const std::wstring sourceDll = sourceDir + L"\\lightency_hook.dll";
-    const DWORD sourceDirAttributes = GetFileAttributesW(sourceDir.c_str());
-    const DWORD exeAttributes = GetFileAttributesW(sourceExe.c_str());
-    const DWORD dllAttributes = GetFileAttributesW(sourceDll.c_str());
-    if (sourceDirAttributes == INVALID_FILE_ATTRIBUTES ||
-        !(sourceDirAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
-        (sourceDirAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
-        exeAttributes == INVALID_FILE_ATTRIBUTES ||
-        (exeAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
-        dllAttributes == INVALID_FILE_ATTRIBUTES ||
-        (dllAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) {
-        errorMsg = L"The release archive must contain both lightency.exe and lightency_hook.dll.";
+
+    wchar_t currentExePath[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, currentExePath, MAX_PATH);
+    std::wstring currentExe(currentExePath);
+    size_t lastSlash = currentExe.find_last_of(L"\\/");
+    std::wstring targetDir = (lastSlash != std::wstring::npos) ? currentExe.substr(0, lastSlash) : L"";
+    if (targetDir.empty()) {
+        errorMsg = L"Could not determine Lightency installation directory.";
         return false;
     }
 
-    wchar_t targetExePath[MAX_PATH]{};
-    const DWORD targetPathLength = GetModuleFileNameW(nullptr, targetExePath, ARRAYSIZE(targetExePath));
-    if (!targetPathLength || targetPathLength >= ARRAYSIZE(targetExePath)) {
-        errorMsg = L"Could not determine the current Lightency executable path.";
+    std::wstring exeOld = targetDir + L"\\lightency.exe.old";
+    std::wstring dllOld = targetDir + L"\\lightency_hook.dll.old";
+    
+    STARTUPINFOW siKill{ sizeof(siKill) };
+    PROCESS_INFORMATION piKill{};
+    siKill.dwFlags = STARTF_USESHOWWINDOW;
+    siKill.wShowWindow = SW_HIDE;
+    std::wstring killCmd = std::wstring(sysDir) + L"\\taskkill.exe /F /IM StartMenuExperienceHost.exe";
+    std::vector<wchar_t> killBuf(killCmd.begin(), killCmd.end());
+    killBuf.push_back(L'\0');
+    if (CreateProcessW(nullptr, killBuf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &siKill, &piKill)) {
+        WaitForSingleObject(piKill.hProcess, 3000);
+        CloseHandle(piKill.hProcess);
+        CloseHandle(piKill.hThread);
+    }
+
+    DeleteFileW(exeOld.c_str());
+    DeleteFileW(dllOld.c_str());
+
+    MoveFileW((targetDir + L"\\lightency.exe").c_str(), exeOld.c_str());
+    MoveFileW((targetDir + L"\\lightency_hook.dll").c_str(), dllOld.c_str());
+
+    if (!CopyFileW((sourceDir + L"\\lightency.exe").c_str(), (targetDir + L"\\lightency.exe").c_str(), FALSE)) {
+        DeleteFileW((targetDir + L"\\lightency.exe").c_str());
+        MoveFileW(exeOld.c_str(), (targetDir + L"\\lightency.exe").c_str());
+        MoveFileW(dllOld.c_str(), (targetDir + L"\\lightency_hook.dll").c_str());
+        errorMsg = L"Failed to overwrite lightency.exe.";
         return false;
     }
-    std::wstring launchCmd = L"\"" + sourceExe + L"\" --apply-update \"" + tempDir +
-        L"\" " + std::to_wstring(GetCurrentProcessId()) + L" \"" + targetExePath + L"\"";
+
+    CopyFileW((sourceDir + L"\\lightency_hook.dll").c_str(), (targetDir + L"\\lightency_hook.dll").c_str(), FALSE);
+
+    wchar_t sysDir2[MAX_PATH]{};
+    GetSystemDirectoryW(sysDir2, MAX_PATH);
+    std::wstring xcopyCmd = std::wstring(sysDir2) + L"\\cmd.exe /c xcopy /y /e /i /q \"" + sourceDir + L"\\*\" \"" + targetDir + L"\\\"";
+    STARTUPINFOW siXcopy{ sizeof(siXcopy) };
+    PROCESS_INFORMATION piXcopy{};
+    siXcopy.dwFlags = STARTF_USESHOWWINDOW;
+    siXcopy.wShowWindow = SW_HIDE;
+    std::vector<wchar_t> xcopyBuf(xcopyCmd.begin(), xcopyCmd.end());
+    xcopyBuf.push_back(L'\0');
+    if (CreateProcessW(nullptr, xcopyBuf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &siXcopy, &piXcopy)) {
+        WaitForSingleObject(piXcopy.hProcess, 10000);
+        CloseHandle(piXcopy.hProcess);
+        CloseHandle(piXcopy.hThread);
+    }
+
+    std::wstring launchCmd = L"\"" + targetDir + L"\\lightency.exe\" --cleanup-update \"" + tempDir + L"\"";
     STARTUPINFOW siLaunch{ sizeof(siLaunch) };
     PROCESS_INFORMATION piLaunch{};
     std::vector<wchar_t> launchBuf(launchCmd.begin(), launchCmd.end());
     launchBuf.push_back(L'\0');
-    if (!CreateProcessW(nullptr, launchBuf.data(), nullptr, nullptr, FALSE, 0, nullptr,
-            sourceDir.c_str(), &siLaunch, &piLaunch)) {
-        errorMsg = L"Failed to start the update helper (error " +
-            std::to_wstring(GetLastError()) + L").";
+    if (!CreateProcessW(nullptr, launchBuf.data(), nullptr, nullptr, FALSE, 0, nullptr, targetDir.c_str(), &siLaunch, &piLaunch)) {
+        errorMsg = L"Failed to start updated Lightency.";
         return false;
     }
     CloseHandle(piLaunch.hProcess);
     CloseHandle(piLaunch.hThread);
 
-    BorderManager::Shutdown();
-    WindowAnimation::Shutdown();
+
     ApplyNormalToAllTaskbars();
     Injector::Shutdown();
     ExitProcess(0);
-    return true;
-}
-
-bool GetCanonicalPath(const std::wstring& path, std::wstring& result) {
-    std::vector<wchar_t> buffer(MAX_PATH, L'\0');
-    for (;;) {
-        const DWORD length = GetFullPathNameW(path.c_str(),
-            static_cast<DWORD>(buffer.size()), buffer.data(), nullptr);
-        if (!length) return false;
-        if (length < buffer.size()) {
-            result.assign(buffer.data(), length);
-            return true;
-        }
-        if (length >= 32768) return false;
-        buffer.resize(static_cast<size_t>(length) + 1, L'\0');
-    }
-}
-
-bool IsGeneratedUpdateDirectory(const std::wstring& candidate) {
-    if (candidate.empty()) return false;
-    std::vector<wchar_t> tempBuffer(MAX_PATH, L'\0');
-    std::wstring tempPath;
-    for (;;) {
-        const DWORD length = GetTempPathW(static_cast<DWORD>(tempBuffer.size()), tempBuffer.data());
-        if (!length || length >= 32768) return false;
-        if (length < tempBuffer.size()) {
-            tempPath.assign(tempBuffer.data(), length);
-            break;
-        }
-        tempBuffer.resize(static_cast<size_t>(length) + 1, L'\0');
-    }
-
-    std::wstring fullTemp, fullCandidate;
-    if (!GetCanonicalPath(tempPath, fullTemp) ||
-        !GetCanonicalPath(candidate, fullCandidate)) return false;
-    if (fullTemp.empty() || fullCandidate.size() <= fullTemp.size()) return false;
-    if (fullTemp.back() != L'\\' && fullTemp.back() != L'/') fullTemp.push_back(L'\\');
-    if (fullCandidate.size() <= fullTemp.size() ||
-        _wcsnicmp(fullCandidate.c_str(), fullTemp.c_str(), fullTemp.size()) != 0) return false;
-
-    const std::wstring leaf = fullCandidate.substr(fullTemp.size());
-    const DWORD attributes = GetFileAttributesW(fullCandidate.c_str());
-    return leaf.rfind(L"LightencyUpdate_", 0) == 0 &&
-        leaf.find_first_of(L"\\/") == std::wstring::npos &&
-        attributes != INVALID_FILE_ATTRIBUTES &&
-        (attributes & FILE_ATTRIBUTE_DIRECTORY) &&
-        !(attributes & FILE_ATTRIBUTE_REPARSE_POINT);
-}
-
-bool ApplyStagedUpdatePayload(const std::wstring& tempDir, DWORD ownerPid,
-                              const std::wstring& requestedTargetExe,
-                              std::wstring& errorMsg) {
-    if (!ownerPid || !IsGeneratedUpdateDirectory(tempDir) || requestedTargetExe.empty()) {
-        errorMsg = L"The staged update directory or owner process is invalid.";
-        return false;
-    }
-
-    const std::wstring extractDir = tempDir + L"\\extracted";
-    const std::wstring sourceDir = FindExecutableInDir(extractDir);
-    if (sourceDir.empty()) {
-        errorMsg = L"Updated Lightency files were not found in the staging directory.";
-        return false;
-    }
-    const std::wstring sourceExe = sourceDir + L"\\lightency.exe";
-    const std::wstring sourceDll = sourceDir + L"\\lightency_hook.dll";
-    const DWORD sourceDirAttributes = GetFileAttributesW(sourceDir.c_str());
-    const DWORD sourceExeAttributes = GetFileAttributesW(sourceExe.c_str());
-    const DWORD sourceDllAttributes = GetFileAttributesW(sourceDll.c_str());
-    if (sourceDirAttributes == INVALID_FILE_ATTRIBUTES ||
-        !(sourceDirAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
-        (sourceDirAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
-        sourceExeAttributes == INVALID_FILE_ATTRIBUTES ||
-        (sourceExeAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
-        sourceDllAttributes == INVALID_FILE_ATTRIBUTES ||
-        (sourceDllAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) {
-        errorMsg = L"The staged update must contain regular Lightency executable and hook files.";
-        return false;
-    }
-
-    std::wstring targetExe;
-    if (!GetCanonicalPath(requestedTargetExe, targetExe)) {
-        errorMsg = L"Could not validate the Lightency installation path.";
-        return false;
-    }
-    const size_t lastSlash = targetExe.find_last_of(L"\\/");
-    if (lastSlash == std::wstring::npos ||
-        _wcsicmp(targetExe.c_str() + lastSlash + 1, L"lightency.exe") != 0) {
-        errorMsg = L"The owner process is not running from a Lightency installation.";
-        return false;
-    }
-    const std::wstring targetDir = targetExe.substr(0, lastSlash);
-    HANDLE ownerProcess = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-        FALSE, ownerPid);
-    if (ownerProcess) {
-        wchar_t ownerPath[MAX_PATH]{};
-        DWORD ownerPathLength = ARRAYSIZE(ownerPath);
-        if (!QueryFullProcessImageNameW(ownerProcess, 0, ownerPath, &ownerPathLength)) {
-            const DWORD pathError = GetLastError();
-            CloseHandle(ownerProcess);
-            errorMsg = L"Could not verify the Lightency installation path (error " +
-                std::to_wstring(pathError) + L").";
-            return false;
-        }
-        std::wstring actualTargetExe;
-        if (!GetCanonicalPath(std::wstring(ownerPath, ownerPathLength), actualTargetExe) ||
-            _wcsicmp(actualTargetExe.c_str(), targetExe.c_str()) != 0) {
-            CloseHandle(ownerProcess);
-            errorMsg = L"The update helper does not match the running Lightency process.";
-            return false;
-        }
-        const DWORD ownerWait = WaitForSingleObject(ownerProcess, 30000);
-        if (ownerWait != WAIT_OBJECT_0) {
-            const DWORD waitError = ownerWait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
-            CloseHandle(ownerProcess);
-            errorMsg = L"The previous Lightency process did not exit cleanly (error " +
-                std::to_wstring(waitError) + L").";
-            return false;
-        }
-        CloseHandle(ownerProcess);
-    } else {
-        const DWORD openError = GetLastError();
-        if (openError != ERROR_INVALID_PARAMETER) {
-            errorMsg = L"Could not verify the Lightency process being updated (error " +
-                std::to_wstring(openError) + L").";
-            return false;
-        }
-    }
-
-    const std::wstring targetDll = targetDir + L"\\lightency_hook.dll";
-    const std::wstring exeOld = targetExe + L".old";
-    const std::wstring dllOld = targetDll + L".old";
-    const DWORD targetExeAttributes = GetFileAttributesW(targetExe.c_str());
-    const DWORD targetDllAttributes = GetFileAttributesW(targetDll.c_str());
-    if (targetExeAttributes == INVALID_FILE_ATTRIBUTES ||
-        (targetExeAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
-        (targetDllAttributes != INVALID_FILE_ATTRIBUTES &&
-            (targetDllAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)))) {
-        errorMsg = L"The current Lightency installation files are missing or invalid.";
-        return false;
-    }
-    if (GetFileAttributesW(exeOld.c_str()) != INVALID_FILE_ATTRIBUTES ||
-        GetFileAttributesW(dllOld.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        errorMsg = L"A previous update backup already exists; restart Lightency before updating again.";
-        return false;
-    }
-
-    bool movedExe = false;
-    bool movedDll = false;
-    bool attemptedExeCopy = false;
-    bool attemptedDllCopy = false;
-    auto rollback = [&]() {
-        bool restored = true;
-        if (attemptedExeCopy && !DeleteFileW(targetExe.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND)
-            restored = false;
-        if (attemptedDllCopy && !DeleteFileW(targetDll.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND)
-            restored = false;
-        if (movedDll && !MoveFileW(dllOld.c_str(), targetDll.c_str())) restored = false;
-        if (movedExe && !MoveFileW(exeOld.c_str(), targetExe.c_str())) restored = false;
-        return restored;
-    };
-    auto launchPreviousVersion = [&]() {
-        const std::wstring command = L"\"" + targetExe + L"\"";
-        std::vector<wchar_t> buffer(command.begin(), command.end());
-        buffer.push_back(L'\0');
-        STARTUPINFOW startupInfo{ sizeof(startupInfo) };
-        PROCESS_INFORMATION processInfo{};
-        if (!CreateProcessW(nullptr, buffer.data(), nullptr, nullptr, FALSE, 0,
-                nullptr, targetDir.c_str(), &startupInfo, &processInfo)) return false;
-        CloseHandle(processInfo.hProcess);
-        CloseHandle(processInfo.hThread);
-        return true;
-    };
-
-    if (!MoveFileW(targetExe.c_str(), exeOld.c_str())) {
-        const DWORD moveError = GetLastError();
-        launchPreviousVersion();
-        errorMsg = L"Could not back up the previous lightency.exe (error " +
-            std::to_wstring(moveError) + L").";
-        return false;
-    }
-    movedExe = true;
-    if (targetDllAttributes != INVALID_FILE_ATTRIBUTES) {
-        DWORD moveError = ERROR_SUCCESS;
-        for (int attempt = 0; attempt < 50; ++attempt) {
-            if (MoveFileW(targetDll.c_str(), dllOld.c_str())) {
-                movedDll = true;
-                break;
-            }
-            moveError = GetLastError();
-            if (moveError != ERROR_SHARING_VIOLATION && moveError != ERROR_ACCESS_DENIED &&
-                moveError != ERROR_LOCK_VIOLATION) break;
-            Sleep(100);
-        }
-        if (!movedDll) {
-            const bool restored = rollback();
-            if (restored) {
-                launchPreviousVersion();
-                errorMsg = L"Could not back up lightency_hook.dll (error " +
-                    std::to_wstring(moveError) + L").";
-            } else {
-                errorMsg = L"Could not back up lightency_hook.dll or restore the previous executable.";
-            }
-            return false;
-        }
-    }
-
-    attemptedExeCopy = true;
-    if (!CopyFileW(sourceExe.c_str(), targetExe.c_str(), TRUE)) {
-        const bool restored = rollback();
-        if (restored) launchPreviousVersion();
-        errorMsg = restored ? L"Failed to install lightency.exe." :
-            L"Failed to install lightency.exe and restore the previous version.";
-        return false;
-    }
-    attemptedDllCopy = true;
-    if (!CopyFileW(sourceDll.c_str(), targetDll.c_str(), TRUE)) {
-        const bool restored = rollback();
-        if (restored) launchPreviousVersion();
-        errorMsg = restored ? L"Failed to install lightency_hook.dll." :
-            L"Failed to install lightency_hook.dll and restore the previous version.";
-        return false;
-    }
-
-    const std::wstring sourceLicense = sourceDir + L"\\LICENSE.txt";
-    if (GetFileAttributesW(sourceLicense.c_str()) != INVALID_FILE_ATTRIBUTES)
-        CopyFileW(sourceLicense.c_str(), (targetDir + L"\\LICENSE.txt").c_str(), FALSE);
-
-    const std::wstring launchCmd = L"\"" + targetExe + L"\" --cleanup-update \"" + tempDir + L"\"";
-    std::vector<wchar_t> launchBuffer(launchCmd.begin(), launchCmd.end());
-    launchBuffer.push_back(L'\0');
-    STARTUPINFOW startupInfo{ sizeof(startupInfo) };
-    PROCESS_INFORMATION processInfo{};
-    if (!CreateProcessW(nullptr, launchBuffer.data(), nullptr, nullptr, FALSE, 0,
-            nullptr, targetDir.c_str(), &startupInfo, &processInfo)) {
-        const DWORD launchError = GetLastError();
-        const bool restored = rollback();
-        if (restored) launchPreviousVersion();
-        if (restored) {
-            errorMsg = L"Failed to start updated Lightency; the previous version was restored (error " +
-                std::to_wstring(launchError) + L").";
-        } else {
-            errorMsg = L"Failed to start updated Lightency and restore the previous version.";
-        }
-        return false;
-    }
-    CloseHandle(processInfo.hProcess);
-    CloseHandle(processInfo.hThread);
     return true;
 }
 
@@ -1393,12 +1111,6 @@ void StartDownloadWorker(DialogState* state) {
 
     state->workerThread = std::thread([state]() {
         std::wstring tempDir = GetTempUpdateDir();
-        if (tempDir.empty()) {
-            state->errorText = L"Could not create a temporary update directory.";
-            state->mode = DialogMode::Error;
-            PostMessageW(state->hwnd, WM_UPDATE_FAILED, 0, 0);
-            return;
-        }
         std::wstring destZip = tempDir + L"\\update.zip";
 
         bool ok = DownloadFile(state->info.zipUrl, destZip, state->info.zipSize,
@@ -1412,14 +1124,12 @@ void StartDownloadWorker(DialogState* state) {
         );
 
         if (state->cancelRequested) {
-            DeleteUpdateDirectory(tempDir);
             state->mode = DialogMode::Details;
             PostMessageW(state->hwnd, WM_UPDATE_STATUS, 0, 0);
             return;
         }
 
         if (!ok) {
-            DeleteUpdateDirectory(tempDir);
             state->errorText = L"Download failed. Please check your internet connection.";
             state->mode = DialogMode::Error;
             PostMessageW(state->hwnd, WM_UPDATE_FAILED, 0, 0);
@@ -1431,8 +1141,7 @@ void StartDownloadWorker(DialogState* state) {
         PostMessageW(state->hwnd, WM_UPDATE_STATUS, 0, 0);
 
         std::wstring errorMsg;
-        if (!ExecuteUpdatePayload(destZip, tempDir, errorMsg)) {
-            DeleteUpdateDirectory(tempDir);
+        if (!ExecuteUpdatePayload(destZip, errorMsg)) {
             state->errorText = errorMsg;
             state->mode = DialogMode::Error;
             PostMessageW(state->hwnd, WM_UPDATE_FAILED, 0, 0);
@@ -1800,12 +1509,6 @@ void PerformCheck(HWND owner, bool manual) {
 
 static std::thread g_checkThread;
 
-bool UpdateManager::ApplyStagedUpdate(const std::wstring& tempDir, DWORD ownerPid,
-                                     const std::wstring& targetExe,
-                                     std::wstring& errorMessage) {
-    return ApplyStagedUpdatePayload(tempDir, ownerPid, targetExe, errorMessage);
-}
-
 void UpdateManager::Start(HWND owner) {
     if (g_checkRunning.load(std::memory_order_acquire)) return;
     if (g_checkThread.joinable()) g_checkThread.join();
@@ -1816,10 +1519,6 @@ void UpdateManager::CheckNow(HWND owner) {
     if (g_checkRunning.load(std::memory_order_acquire)) return;
     if (g_checkThread.joinable()) g_checkThread.join();
     g_checkThread = std::thread([owner]() { PerformCheck(owner, true); });
-}
-
-void UpdateManager::Shutdown() {
-    if (g_checkThread.joinable()) g_checkThread.detach();
 }
 
 }

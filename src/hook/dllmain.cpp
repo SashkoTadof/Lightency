@@ -1,14 +1,22 @@
 #include <windows.h>
 #include <thread>
-#include <system_error>
 #include <atomic>
 #include "dock_animation.h"
 #include "start_menu_size.h"
 #include "../common/types.h"
 #include "../common/diagnostics.h"
 
+static std::atomic<bool> g_shutdownStarted{ false };
 static std::atomic<bool> g_hookReady{ false };
 static std::atomic<bool> g_workerRunning{ false };
+
+static bool IsExplorerProcess() {
+    wchar_t path[MAX_PATH] = {};
+    if (!GetModuleFileNameW(nullptr, path, ARRAYSIZE(path))) return false;
+    const wchar_t* name = wcsrchr(path, L'\\');
+    name = name ? name + 1 : path;
+    return _wcsicmp(name, L"explorer.exe") == 0;
+}
 
 static bool IsStartMenuProcess() {
     static const bool isStartMenuProcess = [] {
@@ -33,71 +41,63 @@ static bool IsOwnerProcessAlive(DWORD pid) {
     return alive;
 }
 
+static std::thread g_workerThread;
+
 static void StartExtensionWorker(HMODULE hModule) {
     if (g_workerRunning.exchange(true, std::memory_order_acq_rel)) {
         if (hModule) FreeLibrary(hModule);
         return;
     }
 
-    try {
-        std::thread([hModule]() {
-            WriteDiagnostic("explorer", "Extension worker started");
-            const bool ready = Lightency::DockAnimation::Initialize();
-            g_hookReady.store(ready, std::memory_order_release);
-            WriteDiagnostic("explorer", "Initialize ready=" + std::to_string(ready));
+    if (g_workerThread.joinable()) {
+        g_workerThread.join();
+    }
 
-            if (!ready) {
-                g_workerRunning.store(false, std::memory_order_release);
-                if (hModule) FreeLibraryAndExitThread(hModule, 0);
-                return;
-            }
+    g_workerThread = std::thread([hModule]() {
+        WriteDiagnostic("explorer", "Extension worker started");
+        const bool ready = Lightency::DockAnimation::Initialize();
+        g_hookReady.store(ready, std::memory_order_release);
+        WriteDiagnostic("explorer", "Initialize ready=" + std::to_string(ready));
 
-            if (HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr)) {
-                SendMessageTimeoutW(taskbar, Lightency::GetLightencyUpdateMsg(),
-                    0, 0, SMTO_ABORTIFHUNG, 1000, nullptr);
-            }
+        if (!ready) {
+            g_workerRunning.store(false, std::memory_order_release);
+            if (hModule) FreeLibraryAndExitThread(hModule, 0);
+            return;
+        }
 
-            HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, Lightency::SHARED_HOOK_CONFIG_MAPPING_NAME);
-            WriteDiagnostic("explorer", "Owner mapping=" + std::to_string(mapping != nullptr) +
-                " winerr=" + std::to_string(GetLastError()));
-            auto* config = mapping ? static_cast<Lightency::SharedHookConfig*>(
-                MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, sizeof(Lightency::SharedHookConfig))) : nullptr;
+        if (HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr)) {
+            SendMessageTimeoutW(taskbar, Lightency::GetLightencyUpdateMsg(),
+                0, 0, SMTO_ABORTIFHUNG, 1000, nullptr);
+        }
 
-            if (config) {
-                UINT_PTR timerId = SetTimer(nullptr, 0, 250, nullptr);
-                if (timerId) {
-                    MSG msg{};
-                    BOOL messageResult = 0;
-                    while ((messageResult = GetMessageW(&msg, nullptr, 0, 0)) > 0) {
-                        TranslateMessage(&msg);
-                        DispatchMessageW(&msg);
-                        if (msg.message == WM_TIMER && msg.wParam == timerId) {
-                            const DWORD ownerPid = config->masterPid;
-                            if (ownerPid == 0 || !IsOwnerProcessAlive(ownerPid)) break;
-                        }
-                    }
-                    KillTimer(nullptr, timerId);
-                } else {
-                    for (;;) {
-                        const DWORD ownerPid = config->masterPid;
-                        if (ownerPid == 0 || !IsOwnerProcessAlive(ownerPid)) break;
-                        Sleep(250);
-                    }
+        HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, Lightency::SHARED_HOOK_CONFIG_MAPPING_NAME);
+        WriteDiagnostic("explorer", "Owner mapping=" + std::to_string(mapping != nullptr) +
+            " winerr=" + std::to_string(GetLastError()));
+        auto* config = mapping ? static_cast<Lightency::SharedHookConfig*>(
+            MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, sizeof(Lightency::SharedHookConfig))) : nullptr;
+
+        if (config) {
+            UINT_PTR timerId = SetTimer(nullptr, 0, 250, nullptr);
+            MSG msg;
+            while (GetMessageW(&msg, nullptr, 0, 0)) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+                if (msg.message == WM_TIMER && msg.wParam == timerId) {
+                    const DWORD ownerPid = config->masterPid;
+                    if (ownerPid == 0 || !IsOwnerProcessAlive(ownerPid)) break;
                 }
             }
+            KillTimer(nullptr, timerId);
+        }
 
-            g_hookReady.store(false, std::memory_order_release);
-            Lightency::DockAnimation::Shutdown();
-            if (config) UnmapViewOfFile(config);
-            if (mapping) CloseHandle(mapping);
-            g_workerRunning.store(false, std::memory_order_release);
-            WriteDiagnostic("explorer", "Extension worker stopped");
-            if (hModule) FreeLibraryAndExitThread(hModule, 0);
-        }).detach();
-    } catch (const std::system_error&) {
+        g_hookReady.store(false, std::memory_order_release);
+        Lightency::DockAnimation::Shutdown();
+        if (config) UnmapViewOfFile(config);
+        if (mapping) CloseHandle(mapping);
         g_workerRunning.store(false, std::memory_order_release);
-        if (hModule) FreeLibrary(hModule);
-    }
+        WriteDiagnostic("explorer", "Extension worker stopped");
+        if (hModule) FreeLibraryAndExitThread(hModule, 0);
+    });
 }
 
 extern "C" __declspec(dllexport) LRESULT CALLBACK LightencyHookProc(
@@ -110,12 +110,8 @@ extern "C" __declspec(dllexport) LRESULT CALLBACK LightencyHookProc(
             return CallNextHookEx(nullptr, code, wParam, lParam);
         if (IsStartMenuProcess()) {
             thread_local bool initialized = false;
-            if (update && message->wParam == Lightency::LIGHTENCY_HOOK_SHUTDOWN) {
-                Lightency::StartMenuSize::Shutdown();
-                initialized = false;
-            } else if (update || !initialized) {
+            if (update || !initialized)
                 initialized = Lightency::StartMenuSize::RefreshSettings();
-            }
             return CallNextHookEx(nullptr, code, wParam, lParam);
         }
         if (!update) return CallNextHookEx(nullptr, code, wParam, lParam);
@@ -166,9 +162,13 @@ extern "C" __declspec(dllexport) LRESULT CALLBACK LightencyCbtProc(
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID) {
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
+    } else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
+        if (IsStartMenuProcess()) {
+            Lightency::StartMenuSize::Shutdown();
+        }
     }
     return TRUE;
 }

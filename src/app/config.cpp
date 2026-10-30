@@ -94,6 +94,7 @@ AppConfig ConfigManager::Load() {
     cfg.showTrayIcon = ReadBool(L"Settings", L"ShowTrayIcon", true);
     cfg.autostart = IsAutostartEnabled();
     s_lastAutostartSetting = cfg.autostart;
+    if (cfg.autostart) SetAutostart(true);
     cfg.automaticUpdates = ReadBool(L"Settings", L"AutomaticUpdates", true);
     cfg.windowGenieAnimation = ReadBool(L"Window", L"GenieAnimation", false);
     cfg.hideWindowBorders = ReadBool(L"Window", L"HideBorders", false);
